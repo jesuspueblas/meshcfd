@@ -50,7 +50,9 @@ gui (PyQt5)         io (JSON)
 - `meshcfd.gui.initial_conditions_panel` edits the base state and ordered
   spatial initial-condition blocks.
 - `meshcfd.gui.main_window` coordinates case actions, panels, and runs the
-  solver on a background thread, displaying completed cell-centered fields.
+  solver on a background thread, displaying completed cell-centered fields
+  and streaming iteration/residual logs to a bottom Output dock. Optional
+  live field updates are throttled to every ten steps.
 
 The solver handles transient inviscid ideal-gas Euler flow. Pressure inlet,
 pressure outlet, velocity inlet, far-field, and MUSCL-parabolic options are

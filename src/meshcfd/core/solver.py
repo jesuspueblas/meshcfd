@@ -28,6 +28,15 @@ class SolverError(ValueError):
 
 
 @dataclass(frozen=True)
+class SolverProgress:
+    step: int
+    time: float
+    time_step: float
+    residuals: tuple[float, float, float, float]
+    states: tuple[InitialState, ...] | None = None
+
+
+@dataclass(frozen=True)
 class SolverResult:
     states: tuple[InitialState, ...]
     time: float
@@ -63,8 +72,9 @@ class _Geometry:
 def solve_case(
     case: Case,
     initial_states: tuple[InitialState, ...] | None = None,
-    progress_callback: Callable[[int, float], None] | None = None,
+    progress_callback: Callable[[SolverProgress], None] | None = None,
     cancel_callback: Callable[[], bool] | None = None,
+    live_solution_updates: bool = False,
 ) -> SolverResult:
     """Advance a case to its configured end time or iteration limit."""
     if case.mesh is None:
@@ -179,7 +189,32 @@ def solve_case(
         steps = step
         residual = float(np.sqrt(np.mean(derivative**2)))
         if progress_callback is not None:
-            progress_callback(step, time)
+            progress_states = None
+            if live_solution_updates and (
+                step == 1
+                or step % 10 == 0
+                or time >= settings.end_time * (1.0 - 1e-13)
+                or step == settings.max_iterations
+            ):
+                progress_primitive = conservative_to_primitive(
+                    conservative, settings.gamma
+                )
+                progress_states = tuple(
+                    InitialState(*row) for row in progress_primitive.tolist()
+                )
+            component_residuals = tuple(
+                float(value)
+                for value in np.sqrt(np.mean(derivative**2, axis=0))
+            )
+            progress_callback(
+                SolverProgress(
+                    step,
+                    time,
+                    time_step,
+                    component_residuals,
+                    progress_states,
+                )
+            )
         if time >= settings.end_time * (1.0 - 1e-13):
             time = settings.end_time
             completed = True

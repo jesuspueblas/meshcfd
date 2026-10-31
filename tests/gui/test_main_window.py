@@ -1,5 +1,6 @@
 import json
 
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QMessageBox
 
 from meshcfd.core.model import Case
@@ -42,7 +43,23 @@ def test_main_window_initial_state(qtbot):
     assert window.boundary_dock.windowTitle() == "Boundary Conditions"
     assert window.numerics_dock.windowTitle() == "Numerical Setup"
     assert window.initial_conditions_dock.windowTitle() == "Initial Conditions"
+    assert window.output_dock.windowTitle() == "Output"
+    assert window.dockWidgetArea(window.output_dock) == Qt.BottomDockWidgetArea
+    assert not window.output_dock.isHidden()
+    assert window.output_terminal.isReadOnly()
+    assert "MeshCFD ready" in window.output_terminal.toPlainText()
     assert window.action_run.text() == "Run Solver"
+
+
+def test_output_dock_layout_preserves_canvas_width(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.resize(1400, 850)
+    window.show()
+    qtbot.waitUntil(lambda: window.canvas.width() > 300)
+
+    assert window.initial_conditions_scroll.horizontalScrollBar().maximum() == 0
+    assert window.numerics_scroll.horizontalScrollBar().maximum() == 0
 
 
 def test_boundary_and_numerical_controls_update_case(qtbot):
@@ -167,6 +184,22 @@ def test_run_action_runs_solver_and_displays_solution(qtbot):
     assert "Completed at t" in window.status_label.text()
     assert window.canvas.solution is not None
     assert window.action_run.isEnabled()
+    output = window.output_terminal.toPlainText()
+    assert "Starting HLLC solver" in output
+    assert "Iteration" in output
+    assert "ITER" in output
+    assert "Completed at t" in output
+    assert not window.output_dock.isHidden()
+
+
+def test_live_solution_toggle_is_logged_and_used_for_new_runs(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    window.numerics_panel.live_solution_checkbox.setChecked(True)
+
+    assert window._live_solution_updates
+    assert "Live solution updates enabled" in window.output_terminal.toPlainText()
 
 
 def test_case_save_and_open(qtbot, monkeypatch, tmp_path):

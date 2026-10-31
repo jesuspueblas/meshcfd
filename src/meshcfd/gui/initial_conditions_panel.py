@@ -52,8 +52,11 @@ class InitialConditionsPanel(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Base state used outside all blocks:", self))
+        base_state_label = QLabel("Base state used outside all blocks:", self)
+        base_state_label.setWordWrap(True)
+        layout.addWidget(base_state_label)
         base_form = QFormLayout()
+        base_form.setRowWrapPolicy(QFormLayout.WrapLongRows)
         self.base_controls: dict[str, QDoubleSpinBox] = {}
         for key, label, minimum, maximum, default in _BASE_FIELDS:
             control = QDoubleSpinBox(self)
@@ -94,6 +97,7 @@ class InitialConditionsPanel(QWidget):
         layout.addWidget(self.empty_label)
         self.editor = QWidget(self)
         self.form = QFormLayout(self.editor)
+        self.form.setRowWrapPolicy(QFormLayout.WrapLongRows)
         self.block_controls: dict[str, QLineEdit] = {}
         for key, label in _BLOCK_FIELDS:
             control = QLineEdit(self.editor)

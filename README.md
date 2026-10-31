@@ -14,6 +14,9 @@ The current version provides:
 - Transient finite-volume integration of the 2D ideal-gas Euler equations,
   with Rusanov, HLLC, and Roe fluxes; explicit Euler, RK2, and RK3; and
   first-order or limited MUSCL-linear reconstruction.
+- A bottom Output dock that records application messages and per-step time-step
+  and conservative residual history. Live mesh-solution updates can be enabled
+  in Numerical Setup; they are off by default and refresh every ten steps.
 - Spatial initial-condition blocks with safe expressions in `x` and `y`.
 - Initial-solution preview by cell, with selectable variable, palette, and
   linear or logarithmic color scale, automatic or manually specified limits,
@@ -34,6 +37,9 @@ Conditions and Initial Conditions are initially stacked on the left,
 Numerical Setup is on the right, and Solution View is available in its own
 top toolbar. The Solution View toolbar controls the displayed field,
 mesh-edge visibility, smooth coloring, and color scale.
+The Output dock is at the bottom by default and can be shown or hidden from the
+View menu. Its residual history is reported per time step; use Clear Output in
+the View menu to clear the terminal.
 Palettes include Viridis, Plasma, Inferno, Coolwarm, Rainbow, Turbo, and
 Cividis. Automatic color limits are enabled by default; disable Automatic to
 enter manual minimum and maximum values. Logarithmic scales require positive

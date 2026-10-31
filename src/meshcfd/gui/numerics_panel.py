@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
@@ -22,10 +23,12 @@ from meshcfd.core.model import (
 
 class NumericsPanel(QWidget):
     changed = pyqtSignal()
+    live_solution_changed = pyqtSignal(bool)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         form = QFormLayout(self)
+        form.setRowWrapPolicy(QFormLayout.WrapLongRows)
 
         self.reconstruction_combo = self._combo(RECONSTRUCTION_SCHEMES)
         parabolic_index = self.reconstruction_combo.findText("MUSCL parabolic")
@@ -59,6 +62,16 @@ class NumericsPanel(QWidget):
         form.addRow("Specific heat ratio:", self.gamma_spin)
         form.addRow("Gas constant:", self.gas_constant_spin)
 
+        self.live_solution_checkbox = QCheckBox("Update during run", self)
+        self.live_solution_checkbox.setToolTip(
+            "Refresh the mesh display every 10 solver steps. This adds rendering "
+            "overhead and applies to runs started after changing the option."
+        )
+        form.addRow("Live solution:", self.live_solution_checkbox)
+
+        self.live_solution_checkbox.toggled.connect(
+            self.live_solution_changed.emit
+        )
         self._case = Case()
         self._controls = (
             self.reconstruction_combo,

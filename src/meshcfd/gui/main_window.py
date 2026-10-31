@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from PyQt5.QtCore import QSize, Qt, QThread, pyqtSignal
@@ -13,16 +14,19 @@ from PyQt5.QtWidgets import (
     QApplication,
     QDockWidget,
     QFileDialog,
+    QFrame,
     QLabel,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
+    QScrollArea,
     QStyle,
     QToolBar,
 )
 
 from meshcfd.core.initial_conditions import evaluate_initial_conditions
 from meshcfd.core.model import Case, InitialState
-from meshcfd.core.solver import SolverResult, solve_case
+from meshcfd.core.solver import SolverProgress, SolverResult, solve_case
 from meshcfd.gui.boundary_panel import BoundaryPanel
 from meshcfd.gui.canvas import MeshCanvas
 from meshcfd.gui.initial_conditions_panel import InitialConditionsPanel
@@ -33,12 +37,15 @@ from meshcfd.io.project_io import load_case, save_case
 
 
 class _SolverWorker(QThread):
-    progress = pyqtSignal(int, float)
+    progress = pyqtSignal(object)
 
-    def __init__(self, case: Case, initial_states) -> None:
+    def __init__(
+        self, case: Case, initial_states, live_solution_updates: bool
+    ) -> None:
         super().__init__()
         self.case = case
         self.initial_states = initial_states
+        self.live_solution_updates = live_solution_updates
         self.result: SolverResult | None = None
         self.error: str | None = None
 
@@ -49,13 +56,13 @@ class _SolverWorker(QThread):
                 self.initial_states,
                 self._report_progress,
                 self.isInterruptionRequested,
+                self.live_solution_updates,
             )
         except Exception as error:
             self.error = str(error)
 
-    def _report_progress(self, step: int, time: float) -> None:
-        if step == 1 or step % 10 == 0:
-            self.progress.emit(step, time)
+    def _report_progress(self, progress: SolverProgress) -> None:
+        self.progress.emit(progress)
 
 
 class MainWindow(QMainWindow):
@@ -68,6 +75,7 @@ class MainWindow(QMainWindow):
         self._case_revision = 0
         self._run_revision: int | None = None
         self._solver_worker: _SolverWorker | None = None
+        self._live_solution_updates = False
         self._dirty = False
         self.resize(1400, 850)
 
@@ -89,17 +97,40 @@ class MainWindow(QMainWindow):
             self.boundary_dock, self.initial_conditions_dock, Qt.Vertical
         )
         self.numerics_panel = NumericsPanel(self)
+        self.numerics_scroll = QScrollArea(self)
+        self.numerics_scroll.setFrameShape(QFrame.NoFrame)
+        self.numerics_scroll.setWidgetResizable(True)
+        self.numerics_scroll.setWidget(self.numerics_panel)
         self.numerics_dock = self._add_dock(
-            "Numerical Setup", Qt.RightDockWidgetArea, self.numerics_panel
+            "Numerical Setup", Qt.RightDockWidgetArea, self.numerics_scroll
         )
+        self.initial_conditions_scroll = QScrollArea(self)
+        self.initial_conditions_scroll.setFrameShape(QFrame.NoFrame)
+        self.initial_conditions_scroll.setWidgetResizable(True)
+        self.initial_conditions_scroll.setWidget(self.initial_conditions_panel)
+        self.initial_conditions_dock.setWidget(self.initial_conditions_scroll)
+        self.output_terminal = QPlainTextEdit(self)
+        self.output_terminal.setObjectName("output_terminal")
+        self.output_terminal.setReadOnly(True)
+        self.output_terminal.setMaximumBlockCount(10000)
+        self.output_terminal.setPlaceholderText("MeshCFD messages and solver residual history")
+        self.output_terminal.setStyleSheet(
+            "QPlainTextEdit { background: #0F172A; color: #E2E8F0; "
+            "font-family: Consolas, monospace; font-size: 9pt; }"
+        )
+        self.output_dock = self._add_dock(
+            "Output", Qt.BottomDockWidgetArea, self.output_terminal
+        )
+        self.output_dock.setMinimumHeight(120)
         self.resizeDocks(
             [self.boundary_dock, self.initial_conditions_dock],
-            [280, 450],
+            [420, 450],
             Qt.Vertical,
         )
         self.resizeDocks(
-            [self.boundary_dock, self.numerics_dock], [280, 300], Qt.Horizontal
+            [self.boundary_dock, self.numerics_dock], [420, 400], Qt.Horizontal
         )
+        self.resizeDocks([self.output_dock], [180], Qt.Vertical)
         self.visualization_panel = VisualizationPanel(self)
         self.boundary_panel.set_case(self.case)
         self.numerics_panel.set_case(self.case)
@@ -115,6 +146,9 @@ class MainWindow(QMainWindow):
         self.boundary_panel.patch_selected.connect(self.canvas.select_patch)
         self.numerics_panel.changed.connect(self._mark_dirty)
         self.numerics_panel.changed.connect(self._clear_simulation_solution)
+        self.numerics_panel.live_solution_changed.connect(
+            self._set_live_solution_updates
+        )
         self.initial_conditions_panel.changed.connect(self._mark_dirty)
         self.initial_conditions_panel.changed.connect(self._refresh_solution)
         self.visualization_panel.changed.connect(self._update_visualization)
@@ -123,16 +157,32 @@ class MainWindow(QMainWindow):
         self._create_toolbar()
         self._create_menus()
         self._update_title()
+        self._log_output("MeshCFD ready.")
 
-    def _add_dock(self, title: str, area, widget) -> QDockWidget:
+    def _add_dock(
+        self, title: str, area, widget, allowed_areas=None
+    ) -> QDockWidget:
         dock = QDockWidget(title, self)
         dock.setObjectName(title.lower().replace(" ", "_"))
         dock.setWidget(widget)
         dock.setAllowedAreas(
-            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
+            allowed_areas
+            if allowed_areas is not None
+            else Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
         )
         self.addDockWidget(area, dock)
         return dock
+
+    def _log_output(self, message: str, level: str = "INFO") -> None:
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.output_terminal.appendPlainText(
+            f"{timestamp} | {level:<5} | {message}"
+        )
+
+    def _set_live_solution_updates(self, enabled: bool) -> None:
+        self._live_solution_updates = enabled
+        state = "enabled" if enabled else "disabled"
+        self._log_output(f"Live solution updates {state} for future runs.")
 
     def _create_actions(self) -> None:
         self.action_new = QAction("New Case", self)
@@ -187,6 +237,10 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.numerics_dock.toggleViewAction())
         view_menu.addAction(self.initial_conditions_dock.toggleViewAction())
         view_menu.addAction(self.visualization_toolbar.toggleViewAction())
+        view_menu.addAction(self.output_dock.toggleViewAction())
+        self.action_clear_output = QAction("Clear Output", self)
+        self.action_clear_output.triggered.connect(self.output_terminal.clear)
+        view_menu.addAction(self.action_clear_output)
 
     def _create_toolbar(self) -> None:
         toolbar = QToolBar("Case", self)
@@ -279,6 +333,7 @@ class MainWindow(QMainWindow):
         self._update_mesh_info()
         self._refresh_solution()
         self._update_title()
+        self._log_output(f"Loaded case settings: {case.name}.")
 
     def _on_toggle_grid(self, _checked: bool) -> None:
         self.canvas.show_grid = _checked
@@ -300,6 +355,10 @@ class MainWindow(QMainWindow):
             self._initial_solution = None
             self.canvas.set_solution(None)
             self._update_visualization()
+            self._log_output(
+                f"Initial solution preview could not be updated: {error}",
+                "WARNING",
+            )
             self.visualization_panel.set_result(
                 None,
                 self.visualization_panel.palette_combo.currentText(),
@@ -385,6 +444,7 @@ class MainWindow(QMainWindow):
         if self._confirm_discard_changes():
             self._set_case(Case(), None)
             self.status_label.setText("New case.")
+            self._log_output("Created a new case.")
 
     def _on_open(self) -> None:
         if not self._confirm_discard_changes():
@@ -401,10 +461,12 @@ class MainWindow(QMainWindow):
         try:
             case = load_case(path)
         except (OSError, UnicodeError, ValueError) as error:
+            self._log_output(f"Could not open case: {error}", "ERROR")
             QMessageBox.critical(self, "Open Case Error", str(error))
             return
         self._set_case(case, path)
         self.status_label.setText(f"Opened case: {path.name}")
+        self._log_output(f"Opened case: {path}.")
 
     def _on_save(self) -> None:
         if self.current_path is None:
@@ -413,11 +475,13 @@ class MainWindow(QMainWindow):
         try:
             save_case(self.current_path, self.case)
         except (OSError, ValueError) as error:
+            self._log_output(f"Could not save case: {error}", "ERROR")
             QMessageBox.critical(self, "Save Case Error", str(error))
             return
         self._dirty = False
         self._update_title()
         self.status_label.setText(f"Saved case: {self.current_path.name}")
+        self._log_output(f"Saved case: {self.current_path}.")
 
     def _on_save_as(self) -> None:
         default_name = f"{self.case.name}.mcf.json"
@@ -438,12 +502,14 @@ class MainWindow(QMainWindow):
             save_case(path, self.case)
         except (OSError, ValueError) as error:
             self.case.name = previous_name
+            self._log_output(f"Could not save case: {error}", "ERROR")
             QMessageBox.critical(self, "Save Case Error", str(error))
             return
         self.current_path = path
         self._dirty = False
         self._update_title()
         self.status_label.setText(f"Saved case: {path.name}")
+        self._log_output(f"Saved case: {path}.")
 
     def _on_import_mesh(self) -> None:
         filename, _ = QFileDialog.getOpenFileName(
@@ -457,6 +523,7 @@ class MainWindow(QMainWindow):
         try:
             mesh = load_mesh(filename)
         except (OSError, UnicodeError, MeshImportError) as error:
+            self._log_output(f"Could not import mesh: {error}", "ERROR")
             QMessageBox.critical(self, "Mesh Import Error", str(error))
             return
         self.case.set_mesh(mesh, Path(filename))
@@ -466,9 +533,14 @@ class MainWindow(QMainWindow):
         self._refresh_solution()
         self._mark_dirty()
         self.status_label.setText(f"Imported mesh: {Path(filename).name}")
+        self._log_output(
+            f"Imported mesh {Path(filename)}: {len(mesh.cells)} cells, "
+            f"{len(mesh.faces)} faces, {len(mesh.patches)} patches."
+        )
 
     def _on_run(self) -> None:
         if self.case.mesh is None:
+            self._log_output("Cannot start solver: no mesh is loaded.", "WARNING")
             QMessageBox.information(
                 self, "No Mesh", "Import a finite-volume mesh before setting up a run."
             )
@@ -478,16 +550,46 @@ class MainWindow(QMainWindow):
         snapshot = copy.deepcopy(self.case)
         initial_states = copy.deepcopy(self._initial_solution)
         self._run_revision = self._case_revision
-        worker = _SolverWorker(snapshot, initial_states)
+        worker = _SolverWorker(
+            snapshot, initial_states, self._live_solution_updates
+        )
         self._solver_worker = worker
         worker.progress.connect(self._on_solver_progress)
         worker.finished.connect(self._on_solver_finished)
         self.action_run.setEnabled(False)
         self.status_label.setText("Solver running...")
+        self.output_dock.show()
+        self._log_output(
+            f"Starting {snapshot.numerics.flux} solver with "
+            f"{snapshot.numerics.time_integration}, "
+            f"{snapshot.numerics.reconstruction}, "
+            f"CFL={snapshot.numerics.cfl:g}, "
+            f"end time={snapshot.numerics.end_time:g}, "
+            f"maximum steps={snapshot.numerics.max_iterations}."
+        )
+        self._log_output(
+            " Iteration          Time            dt          rho         rhoU"
+            "         rhoV         rhoE"
+        )
         worker.start()
 
-    def _on_solver_progress(self, step: int, time: float) -> None:
-        self.status_label.setText(f"Solver running: step {step}, t = {time:.6g}")
+    def _on_solver_progress(self, progress: SolverProgress) -> None:
+        density, momentum_x, momentum_y, energy = progress.residuals
+        self._log_output(
+            f"{progress.step:10d} {progress.time:12.5e} {progress.time_step:12.5e}"
+            f" {density:12.5e} {momentum_x:12.5e} {momentum_y:12.5e}"
+            f" {energy:12.5e}",
+            "ITER",
+        )
+        self.status_label.setText(
+            f"Solver running: step {progress.step}, t = {progress.time:.6g}"
+        )
+        if (
+            progress.states is not None
+            and self._run_revision == self._case_revision
+        ):
+            self._simulation_solution = progress.states
+            self._update_visualization()
 
     def _on_solver_finished(self) -> None:
         worker = self._solver_worker
@@ -498,16 +600,22 @@ class MainWindow(QMainWindow):
         worker.deleteLater()
         if worker.error is not None:
             self.status_label.setText("Solver failed.")
+            self._log_output(f"Solver failed: {worker.error}", "ERROR")
             QMessageBox.critical(self, "Solver Error", worker.error)
             return
         if self._run_revision != self._case_revision:
             self.status_label.setText(
                 "Run finished for older case settings; results were discarded."
             )
+            self._log_output(
+                "Run finished for older case settings; results were discarded.",
+                "WARNING",
+            )
             return
         result = worker.result
         if result is None:
             self.status_label.setText("Solver failed without a result.")
+            self._log_output("Solver finished without producing a result.", "ERROR")
             QMessageBox.critical(
                 self, "Solver Error", "The solver finished without producing a result."
             )
@@ -515,15 +623,19 @@ class MainWindow(QMainWindow):
         self._simulation_solution = result.states
         self._update_visualization()
         if result.completed:
-            self.status_label.setText(
+            message = (
                 f"Completed at t = {result.time:.6g} in {result.steps} steps "
                 f"(residual {result.residual:.3e})."
             )
+            self.status_label.setText(message)
+            self._log_output(message)
         else:
-            self.status_label.setText(
+            message = (
                 f"Stopped at t = {result.time:.6g} after {result.steps} steps "
                 f"before end time {self.case.numerics.end_time:.6g}."
             )
+            self.status_label.setText(message)
+            self._log_output(message, "WARNING")
 
     def closeEvent(self, event) -> None:
         if self._confirm_discard_changes():

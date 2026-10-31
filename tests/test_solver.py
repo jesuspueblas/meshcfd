@@ -15,7 +15,7 @@ from meshcfd.core.model import (
     MeshPatch,
     PeriodicBoundaryPair,
 )
-from meshcfd.core.solver import SolverError, solve_case
+from meshcfd.core.solver import SolverError, SolverProgress, solve_case
 
 
 def make_periodic_mesh(nx=1, ny=1, length_x=1.0, length_y=1.0):
@@ -217,6 +217,44 @@ def test_solver_reports_iteration_limit_and_rejects_unsupported_choices():
     case.numerics.reconstruction = "MUSCL parabolic"
     with pytest.raises(SolverError, match="not implemented"):
         solve_case(case, (InitialState(),))
+
+
+def test_solver_reports_residual_history_and_optional_live_states():
+    case = make_periodic_case()
+    case.numerics.end_time = 0.1
+    progress = []
+
+    result = solve_case(
+        case,
+        (InitialState(1.0, 0.1, 0.0, 1.0),),
+        progress.append,
+        live_solution_updates=True,
+    )
+
+    assert result.completed
+    assert progress
+    assert all(isinstance(item, SolverProgress) for item in progress)
+    assert progress[-1].time == result.time
+    assert all(item.time_step > 0.0 for item in progress)
+    assert all(len(item.residuals) == 4 for item in progress)
+    assert progress[0].states is not None
+    assert progress[-1].states is not None
+    assert progress[-1].states == result.states
+
+
+def test_solver_progress_omits_states_when_live_updates_are_disabled():
+    case = make_periodic_case()
+    case.numerics.end_time = 0.1
+    progress = []
+
+    solve_case(
+        case,
+        (InitialState(1.0, 0.1, 0.0, 1.0),),
+        progress.append,
+    )
+
+    assert progress
+    assert all(item.states is None for item in progress)
 
 
 def test_isentropic_euler_vortex_runs_for_one_period():
