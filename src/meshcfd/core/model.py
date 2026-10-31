@@ -12,6 +12,7 @@ BOUNDARY_TYPES = (
     "Pressure Outlet",
     "Symmetry",
     "Far Field",
+    "Periodic",
 )
 
 RECONSTRUCTION_SCHEMES = ("First order", "MUSCL linear", "MUSCL parabolic")
@@ -46,6 +47,14 @@ class BoundaryCondition:
     patch_name: str
     kind: str = "Wall"
     values: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class PeriodicBoundaryPair:
+    patch_a_id: int
+    patch_b_id: int
+    axis: str
+    pitch: float
 
 
 @dataclass
@@ -95,6 +104,7 @@ class Case:
     initial_conditions: InitialConditionSettings = field(
         default_factory=InitialConditionSettings
     )
+    periodic_pairs: list[PeriodicBoundaryPair] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.mesh is not None and not self.boundary_conditions:
@@ -116,7 +126,12 @@ class Case:
             BoundaryCondition(
                 patch_id=patch.id,
                 patch_name=patch.name,
-                kind=previous[patch.name].kind if patch.name in previous else "Wall",
+                kind=(
+                    previous[patch.name].kind
+                    if patch.name in previous
+                    and previous[patch.name].kind != "Periodic"
+                    else "Wall"
+                ),
                 values=(
                     dict(previous[patch.name].values)
                     if patch.name in previous
@@ -125,3 +140,4 @@ class Case:
             )
             for patch in mesh.patches
         ]
+        self.periodic_pairs.clear()

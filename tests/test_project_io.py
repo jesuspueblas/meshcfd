@@ -2,7 +2,14 @@ import json
 
 import pytest
 
-from meshcfd.core.model import Case, InitialConditionBlock
+from meshcfd.core.model import (
+    Case,
+    FiniteVolumeMesh,
+    InitialConditionBlock,
+    MeshPatch,
+    PeriodicBoundaryPair,
+)
+from meshcfd.core.periodic import detect_periodic_pair
 from meshcfd.io.mesh_io import mesh_from_dict, mesh_to_dict
 from meshcfd.io.project_io import case_from_dict, case_to_dict, load_case, save_case
 
@@ -68,7 +75,7 @@ def test_case_saves_relative_mesh_reference_and_reloads_mesh(tmp_path):
     save_case(case_path, case)
 
     saved_data = json.loads(case_path.read_text(encoding="utf-8"))
-    assert saved_data["version"] == 3
+    assert saved_data["version"] == 4
     assert saved_data["mesh"] == "../mesh.json"
     assert isinstance(saved_data["mesh"], str)
 
@@ -122,6 +129,58 @@ def test_case_loads_version_one_embedded_mesh():
 
     assert restored.mesh == case.mesh
     assert restored.mesh_path is None
+
+
+def test_periodic_pair_detection_and_case_round_trip(tmp_path):
+    mesh = make_mesh()
+    assert detect_periodic_pair(mesh, 1, 3) == ("x", 1.0)
+    assert detect_periodic_pair(mesh, 0, 2) == ("y", 1.0)
+
+    case = Case(name="periodic", mesh=mesh)
+    case.boundary_conditions[1].kind = "Periodic"
+    case.boundary_conditions[3].kind = "Periodic"
+    case.periodic_pairs.append(PeriodicBoundaryPair(1, 3, "x", 1.0))
+    path = tmp_path / "periodic.mcf.json"
+    save_case(path, case)
+
+    restored = load_case(path)
+
+    assert restored.periodic_pairs == case.periodic_pairs
+    assert restored.boundary_conditions[1].kind == "Periodic"
+    assert restored.boundary_conditions[3].kind == "Periodic"
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 4
+
+
+def test_periodic_pair_detection_rejects_nonmatching_patches():
+    with pytest.raises(ValueError, match="matching translation"):
+        detect_periodic_pair(make_mesh(), 1, 0)
+
+
+def test_periodic_pair_detection_rejects_different_face_geometry():
+    mesh = FiniteVolumeMesh(
+        points=((0, 0), (0, 0.5), (0, 1), (1, 0), (1, 0.4), (1, 1)),
+        cells=(),
+        faces=((0, 1), (1, 2), (3, 4), (4, 5)),
+        face_owners=(),
+        face_neighbours=(),
+        face_patch_ids=(),
+        patches=(MeshPatch(0, "left", (0, 1)), MeshPatch(1, "right", (2, 3))),
+        cell_face_ids=(),
+        cell_face_signs=(),
+    )
+
+    with pytest.raises(ValueError, match="matching translation"):
+        detect_periodic_pair(mesh, 0, 1)
+
+
+def test_case_save_rejects_inconsistent_periodic_pitch():
+    case = Case(mesh=make_mesh())
+    case.boundary_conditions[1].kind = "Periodic"
+    case.boundary_conditions[3].kind = "Periodic"
+    case.periodic_pairs.append(PeriodicBoundaryPair(1, 3, "x", 2.0))
+
+    with pytest.raises(ValueError, match="axis or pitch"):
+        case_to_dict(case)
 
 
 def test_case_save_rejects_invalid_initial_condition_expression():

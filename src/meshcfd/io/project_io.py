@@ -17,20 +17,26 @@ from meshcfd.core.model import (
     TIME_INTEGRATION_SCHEMES,
     BoundaryCondition,
     Case,
+    FiniteVolumeMesh,
     InitialConditionBlock,
     InitialConditionSettings,
     InitialState,
     NumericalSettings,
+    PeriodicBoundaryPair,
 )
+from meshcfd.core.periodic import detect_periodic_pair
 from meshcfd.io.mesh_io import load_mesh, mesh_from_dict, mesh_to_dict
 
 PROJECT_FORMAT = "meshcfd-case"
-PROJECT_VERSION = 3
+PROJECT_VERSION = 4
 
 
 def case_to_dict(
     case: Case, case_path: str | Path | None = None
 ) -> dict[str, Any]:
+    _validate_periodic_pairs(
+        case.mesh, case.boundary_conditions, case.periodic_pairs
+    )
     if case.mesh is None:
         mesh_data = None
     elif case.mesh_path is None:
@@ -62,6 +68,15 @@ def case_to_dict(
             }
             for condition in case.boundary_conditions
         ],
+        "periodic_pairs": [
+            {
+                "patch_a_id": pair.patch_a_id,
+                "patch_b_id": pair.patch_b_id,
+                "axis": pair.axis,
+                "pitch": pair.pitch,
+            }
+            for pair in case.periodic_pairs
+        ],
         "numerics": {
             "reconstruction": case.numerics.reconstruction,
             "limiter": case.numerics.limiter,
@@ -81,9 +96,9 @@ def case_from_dict(
     data: dict[str, Any], case_path: str | Path | None = None
 ) -> Case:
     version = data.get("version")
-    if data.get("format") != PROJECT_FORMAT or version not in (1, 2, PROJECT_VERSION):
+    if data.get("format") != PROJECT_FORMAT or version not in (1, 2, 3, PROJECT_VERSION):
         raise ValueError(
-            f"Unsupported case format. Expected MeshCFD case version 1, 2 or "
+            f"Unsupported case format. Expected MeshCFD case version 1, 2, 3 or "
             f"{PROJECT_VERSION}."
         )
     name = data.get("name")
@@ -210,6 +225,10 @@ def case_from_dict(
             for patch in mesh.patches
             if patch.id not in configured_ids
         )
+    periodic_pairs = _periodic_pairs_from_dict(
+        data.get("periodic_pairs", []), mesh
+    )
+    _validate_periodic_pairs(mesh, conditions, periodic_pairs)
     return Case(
         name=name,
         mesh=mesh,
@@ -217,7 +236,73 @@ def case_from_dict(
         numerics=settings,
         mesh_path=mesh_path,
         initial_conditions=initial_conditions,
+        periodic_pairs=periodic_pairs,
     )
+
+
+def _periodic_pairs_from_dict(
+    raw_pairs: Any, mesh: FiniteVolumeMesh | None
+) -> list[PeriodicBoundaryPair]:
+    if not isinstance(raw_pairs, list):
+        raise ValueError("Periodic boundary pairs must be a list.")
+    pairs = []
+    for raw_pair in raw_pairs:
+        if not isinstance(raw_pair, dict):
+            raise ValueError("Each periodic boundary pair must be an object.")
+        patch_a_id = raw_pair.get("patch_a_id")
+        patch_b_id = raw_pair.get("patch_b_id")
+        if any(
+            isinstance(patch_id, bool) or not isinstance(patch_id, int)
+            for patch_id in (patch_a_id, patch_b_id)
+        ):
+            raise ValueError("Periodic patch identifiers must be integers.")
+        axis = raw_pair.get("axis")
+        if axis not in ("x", "y"):
+            raise ValueError("Periodic axis must be 'x' or 'y'.")
+        pitch = _positive_float(raw_pair.get("pitch"), "Periodic pitch")
+        pairs.append(PeriodicBoundaryPair(patch_a_id, patch_b_id, axis, pitch))
+    return pairs
+
+
+def _validate_periodic_pairs(
+    mesh: FiniteVolumeMesh | None,
+    conditions: list[BoundaryCondition],
+    pairs: list[PeriodicBoundaryPair],
+) -> None:
+    if not pairs and not any(condition.kind == "Periodic" for condition in conditions):
+        return
+    if mesh is None:
+        raise ValueError("Periodic boundary conditions require a mesh.")
+
+    condition_kinds = {condition.patch_id: condition.kind for condition in conditions}
+    paired_patch_ids = set()
+    for pair in pairs:
+        if pair.patch_a_id == pair.patch_b_id:
+            raise ValueError("A periodic pair must contain two different patches.")
+        if pair.patch_a_id in paired_patch_ids or pair.patch_b_id in paired_patch_ids:
+            raise ValueError("A patch can belong to only one periodic pair.")
+        paired_patch_ids.update((pair.patch_a_id, pair.patch_b_id))
+        if any(
+            condition_kinds.get(patch_id) != "Periodic"
+            for patch_id in (pair.patch_a_id, pair.patch_b_id)
+        ):
+            raise ValueError("Both patches in a periodic pair must use the Periodic type.")
+        try:
+            axis, pitch = detect_periodic_pair(
+                mesh, pair.patch_a_id, pair.patch_b_id
+            )
+        except ValueError as error:
+            raise ValueError(f"Invalid periodic patch pair: {error}") from error
+        if pair.axis != axis or not math.isclose(
+            pair.pitch, pitch, rel_tol=1e-9, abs_tol=max(pitch, 1.0) * 1e-9
+        ):
+            raise ValueError("Stored periodic axis or pitch does not match the mesh.")
+    if paired_patch_ids != {
+        condition.patch_id
+        for condition in conditions
+        if condition.kind == "Periodic"
+    }:
+        raise ValueError("Each Periodic boundary must belong to exactly one pair.")
 
 
 def _initial_conditions_from_dict(data: Any) -> InitialConditionSettings:

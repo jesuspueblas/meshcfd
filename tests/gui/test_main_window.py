@@ -71,6 +71,40 @@ def test_boundary_and_numerical_controls_update_case(qtbot):
     assert window.canvas.selected_patch_id == 2
 
 
+def test_boundary_panel_creates_detected_periodic_pair(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    case = Case()
+    case.set_mesh(make_mesh())
+    window._set_case(case, None)
+
+    panel = window.boundary_panel
+    panel.periodic_patch_a_combo.setCurrentIndex(
+        panel.periodic_patch_a_combo.findData(1)
+    )
+    panel.periodic_patch_b_combo.setCurrentIndex(
+        panel.periodic_patch_b_combo.findData(3)
+    )
+
+    assert panel.add_periodic_pair_button.isEnabled()
+    assert "X" in panel.periodic_status.text()
+    assert "pitch = 1" in panel.periodic_status.text()
+
+    panel.add_periodic_pair_button.click()
+
+    assert window.case.periodic_pairs[0].axis == "x"
+    assert window.case.periodic_pairs[0].pitch == 1.0
+    assert window.case.boundary_conditions[1].kind == "Periodic"
+    assert window.case.boundary_conditions[3].kind == "Periodic"
+    assert window._dirty
+    assert panel.periodic_pairs_list.count() == 1
+
+    panel.periodic_pairs_list.setCurrentRow(0)
+    panel.remove_periodic_pair_button.click()
+    assert not window.case.periodic_pairs
+    assert window.case.boundary_conditions[1].kind == "Wall"
+
+
 def test_initial_condition_panel_adds_and_edits_ordered_blocks(
     qtbot, monkeypatch
 ):

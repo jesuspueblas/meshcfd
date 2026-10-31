@@ -11,6 +11,8 @@ gui (PyQt5)         io (JSON)
 
 - `meshcfd.core.model` defines the case, finite-volume mesh, boundary
   conditions, initial-condition blocks, and numerical settings.
+- `meshcfd.core.periodic` checks that two boundary patches match after a
+  translation along x or y, then returns the axis and pitch.
 - `meshcfd.core.expressions` safely parses mathematical expressions in `x` and
   `y`; `meshcfd.core.initial_conditions` evaluates blocks at cell centroids,
   using the last matching block and a configurable base state elsewhere.
@@ -19,8 +21,8 @@ gui (PyQt5)         io (JSON)
   and preserves face, cell, and patch connectivity.
 - `meshcfd.io.project_io` saves mesh references relative to the case file and
   loads them when opening a case. Cases without a source mesh file can still
-  embed their mesh; version 1 embedded-mesh and version 2 referenced-mesh
-  cases remain supported.
+  embed their mesh; versions 1 through 3 remain supported, and version 4
+  stores periodic patch pairs.
 - `meshcfd.gui.canvas` displays cells and colored patch faces.
 - `meshcfd.gui.visualization_panel` selects the initial-solution field,
   palette, linear or logarithmic scale, automatic or manual color limits, and
@@ -33,7 +35,8 @@ gui (PyQt5)         io (JSON)
   grip. Vertical legends show their numeric labels to the right of the color
   ramp and identify the displayed variable. Smooth colors are rendered using
   native Qt gradients to avoid per-pixel Python loops.
-- `meshcfd.gui.boundary_panel` configures one boundary condition per patch.
+- `meshcfd.gui.boundary_panel` configures one boundary condition per patch and
+  creates compatible x- or y-periodic pairs with their detected pitch.
 - `meshcfd.gui.numerics_panel` edits reconstruction, limiter, flux,
   time-integration, and gas parameters.
 - `meshcfd.gui.initial_conditions_panel` edits the base state and ordered

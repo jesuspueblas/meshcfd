@@ -11,7 +11,9 @@ from meshcfd.core.model import (
     FiniteVolumeMesh,
     MeshPatch,
     NumericalSettings,
+    PeriodicBoundaryPair,
 )
+from meshcfd.core.periodic import detect_periodic_pair
 
 __all__ = [
     "BOUNDARY_TYPES",
@@ -22,6 +24,8 @@ __all__ = [
     "LIMITER_SCHEMES",
     "MeshPatch",
     "NumericalSettings",
+    "PeriodicBoundaryPair",
     "RECONSTRUCTION_SCHEMES",
     "TIME_INTEGRATION_SCHEMES",
+    "detect_periodic_pair",
 ]

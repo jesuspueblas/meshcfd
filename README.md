@@ -9,6 +9,8 @@ The current version provides:
 - Import and visualization of finite-volume mesh JSON files exported by
   MeshCAD.
 - Per-patch boundary-condition setup.
+- Translational periodic boundaries, with automatic patch compatibility checks
+  and pitch detection along the x or y axis.
 - Spatial initial-condition blocks with safe expressions in `x` and `y`.
 - Initial-solution preview by cell, with selectable variable, palette, and
   linear or logarithmic color scale, automatic or manually specified limits,
