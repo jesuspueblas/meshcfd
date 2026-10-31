@@ -1,0 +1,95 @@
+"""Core data models used by the MeshCFD case editor."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+BOUNDARY_TYPES = (
+    "Wall",
+    "Velocity Inlet",
+    "Pressure Inlet",
+    "Pressure Outlet",
+    "Symmetry",
+    "Far Field",
+)
+
+RECONSTRUCTION_SCHEMES = ("First order", "MUSCL linear", "MUSCL parabolic")
+LIMITER_SCHEMES = ("Barth-Jespersen", "Venkatakrishnan", "Minmod", "Van Leer")
+FLUX_SCHEMES = ("HLLC", "Roe", "Rusanov")
+TIME_INTEGRATION_SCHEMES = ("Explicit Euler", "Explicit RK2", "Explicit RK3")
+
+
+@dataclass
+class MeshPatch:
+    id: int
+    name: str
+    face_ids: tuple[int, ...]
+
+
+@dataclass
+class FiniteVolumeMesh:
+    points: tuple[tuple[float, float], ...]
+    cells: tuple[tuple[int, ...], ...]
+    faces: tuple[tuple[int, int], ...]
+    face_owners: tuple[int, ...]
+    face_neighbours: tuple[int, ...]
+    face_patch_ids: tuple[int, ...]
+    patches: tuple[MeshPatch, ...]
+    cell_face_ids: tuple[tuple[int, ...], ...]
+    cell_face_signs: tuple[tuple[int, ...], ...]
+
+
+@dataclass
+class BoundaryCondition:
+    patch_id: int
+    patch_name: str
+    kind: str = "Wall"
+    values: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
+class NumericalSettings:
+    reconstruction: str = "MUSCL linear"
+    limiter: str = "Barth-Jespersen"
+    flux: str = "HLLC"
+    time_integration: str = "Explicit RK2"
+    cfl: float = 0.5
+    max_iterations: int = 1000
+    residual_tolerance: float = 1e-6
+    gamma: float = 1.4
+    gas_constant: float = 287.05
+
+
+@dataclass
+class Case:
+    name: str = "Untitled"
+    mesh: FiniteVolumeMesh | None = None
+    boundary_conditions: list[BoundaryCondition] = field(default_factory=list)
+    numerics: NumericalSettings = field(default_factory=NumericalSettings)
+
+    def __post_init__(self) -> None:
+        if self.mesh is not None and not self.boundary_conditions:
+            self.boundary_conditions = [
+                BoundaryCondition(patch.id, patch.name)
+                for patch in self.mesh.patches
+            ]
+
+    def set_mesh(self, mesh: FiniteVolumeMesh) -> None:
+        previous = {
+            condition.patch_name: condition
+            for condition in self.boundary_conditions
+        }
+        self.mesh = mesh
+        self.boundary_conditions = [
+            BoundaryCondition(
+                patch_id=patch.id,
+                patch_name=patch.name,
+                kind=previous[patch.name].kind if patch.name in previous else "Wall",
+                values=(
+                    dict(previous[patch.name].values)
+                    if patch.name in previous
+                    else {}
+                ),
+            )
+            for patch in mesh.patches
+        ]
