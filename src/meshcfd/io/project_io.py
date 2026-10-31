@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from pathlib import Path
 from typing import Any
 
@@ -17,18 +18,36 @@ from meshcfd.core.model import (
     Case,
     NumericalSettings,
 )
-from meshcfd.io.mesh_io import mesh_from_dict, mesh_to_dict
+from meshcfd.io.mesh_io import load_mesh, mesh_from_dict, mesh_to_dict
 
 PROJECT_FORMAT = "meshcfd-case"
-PROJECT_VERSION = 1
+PROJECT_VERSION = 2
 
 
-def case_to_dict(case: Case) -> dict[str, Any]:
+def case_to_dict(
+    case: Case, case_path: str | Path | None = None
+) -> dict[str, Any]:
+    if case.mesh is None:
+        mesh_data = None
+    elif case.mesh_path is None:
+        mesh_data = mesh_to_dict(case.mesh)
+    else:
+        if case_path is None:
+            raise ValueError("A case file path is required to save the mesh reference.")
+        mesh_path = Path(case.mesh_path).resolve()
+        case_directory = Path(case_path).resolve().parent
+        try:
+            mesh_data = Path(os.path.relpath(mesh_path, case_directory)).as_posix()
+        except ValueError as error:
+            raise ValueError(
+                "The mesh file and case file must be on the same drive "
+                "to save a relative mesh reference."
+            ) from error
     return {
         "format": PROJECT_FORMAT,
         "version": PROJECT_VERSION,
         "name": case.name,
-        "mesh": mesh_to_dict(case.mesh) if case.mesh is not None else None,
+        "mesh": mesh_data,
         "boundary_conditions": [
             {
                 "patch_id": condition.patch_id,
@@ -52,10 +71,14 @@ def case_to_dict(case: Case) -> dict[str, Any]:
     }
 
 
-def case_from_dict(data: dict[str, Any]) -> Case:
-    if data.get("format") != PROJECT_FORMAT or data.get("version") != PROJECT_VERSION:
+def case_from_dict(
+    data: dict[str, Any], case_path: str | Path | None = None
+) -> Case:
+    version = data.get("version")
+    if data.get("format") != PROJECT_FORMAT or version not in (1, PROJECT_VERSION):
         raise ValueError(
-            f"Unsupported case format. Expected MeshCFD case version {PROJECT_VERSION}."
+            f"Unsupported case format. Expected MeshCFD case version 1 or "
+            f"{PROJECT_VERSION}."
         )
     name = data.get("name")
     if not isinstance(name, str) or not name.strip():
@@ -63,10 +86,22 @@ def case_from_dict(data: dict[str, Any]) -> Case:
 
     mesh_data = data.get("mesh")
     mesh = None
+    mesh_path: Path | None = None
     if mesh_data is not None:
-        if not isinstance(mesh_data, dict):
+        if isinstance(mesh_data, dict):
+            mesh = mesh_from_dict(mesh_data)
+        elif version == PROJECT_VERSION:
+            if not isinstance(mesh_data, str) or not mesh_data.strip():
+                raise ValueError("Case mesh reference must be a non-empty path or null.")
+            reference = Path(mesh_data)
+            if reference.is_absolute():
+                raise ValueError("Case mesh reference must be relative.")
+            if case_path is None:
+                raise ValueError("A case file path is required to resolve the mesh reference.")
+            mesh_path = (Path(case_path).resolve().parent / reference).resolve()
+            mesh = load_mesh(mesh_path)
+        else:
             raise ValueError("Case mesh data must be an object or null.")
-        mesh = mesh_from_dict(mesh_data)
 
     raw_conditions = data.get("boundary_conditions", [])
     if not isinstance(raw_conditions, list):
@@ -165,7 +200,7 @@ def case_from_dict(data: dict[str, Any]) -> Case:
             for patch in mesh.patches
             if patch.id not in configured_ids
         )
-    return Case(name, mesh, conditions, settings)
+    return Case(name, mesh, conditions, settings, mesh_path)
 
 
 def _positive_float(value: Any, description: str) -> float:
@@ -195,14 +230,14 @@ def load_case(path: str | Path) -> Case:
         raise ValueError(f"Could not read case file '{source}': {error}") from error
     if not isinstance(data, dict):
         raise ValueError("Case file must contain a JSON object.")
-    return case_from_dict(data)
+    return case_from_dict(data, source)
 
 
 def save_case(path: str | Path, case: Case) -> None:
     output = Path(path)
     with output.open("w", encoding="utf-8", newline="\n") as stream:
         json.dump(
-            case_to_dict(case),
+            case_to_dict(case, output),
             stream,
             ensure_ascii=False,
             indent=2,

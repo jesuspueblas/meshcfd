@@ -1,5 +1,7 @@
+import json
+
 from meshcfd.core.model import Case
-from meshcfd.io.mesh_io import mesh_from_dict
+from meshcfd.io.mesh_io import mesh_from_dict, mesh_to_dict
 from meshcfd.io.project_io import case_from_dict, case_to_dict, load_case, save_case
 
 
@@ -51,6 +53,38 @@ def test_case_round_trip_keeps_mesh_and_setup(tmp_path):
     assert len(restored.boundary_conditions) == 4
     assert restored.boundary_conditions[1].values["velocity_x"] == 80.0
     assert restored.numerics.reconstruction == "MUSCL parabolic"
+
+
+def test_case_saves_relative_mesh_reference_and_reloads_mesh(tmp_path):
+    mesh_path = tmp_path / "mesh.json"
+    mesh_path.write_text(json.dumps(mesh_to_dict(make_mesh())), encoding="utf-8")
+    case_path = tmp_path / "cases" / "channel.mcf.json"
+    case_path.parent.mkdir()
+    case = Case(name="channel")
+    case.set_mesh(make_mesh(), mesh_path)
+
+    save_case(case_path, case)
+
+    saved_data = json.loads(case_path.read_text(encoding="utf-8"))
+    assert saved_data["version"] == 2
+    assert saved_data["mesh"] == "../mesh.json"
+    assert isinstance(saved_data["mesh"], str)
+
+    restored = load_case(case_path)
+    assert restored.mesh == case.mesh
+    assert restored.mesh_path == mesh_path.resolve()
+
+
+def test_case_loads_version_one_embedded_mesh():
+    case = Case(name="legacy")
+    case.set_mesh(make_mesh())
+    data = case_to_dict(case)
+    data["version"] = 1
+
+    restored = case_from_dict(data)
+
+    assert restored.mesh == case.mesh
+    assert restored.mesh_path is None
 
 
 def test_case_load_fills_default_conditions_for_unconfigured_patches():

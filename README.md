@@ -13,6 +13,9 @@ The current version provides:
   time integration.
 - New, open, and save case configuration.
 
+Cases reference imported mesh files using a path relative to the case file.
+Keep the mesh file alongside the case when moving or sharing it.
+
 The CFD solver is not implemented yet. The Run action is an explicit
 placeholder and does not start a simulation.
 

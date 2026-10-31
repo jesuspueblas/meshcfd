@@ -13,7 +13,9 @@ gui (PyQt5)         io (JSON)
   conditions, and initial numerical settings.
 - `meshcfd.io.mesh_io` reads MeshCAD's versioned 2D finite-volume mesh JSON
   and preserves face, cell, and patch connectivity.
-- `meshcfd.io.project_io` saves and loads self-contained MeshCFD case files.
+- `meshcfd.io.project_io` saves mesh references relative to the case file and
+  loads them when opening a case. Cases without a source mesh file can still
+  embed their mesh; version 1 cases with embedded meshes remain supported.
 - `meshcfd.gui.canvas` displays cells and colored patch faces.
 - `meshcfd.gui.boundary_panel` configures one boundary condition per patch.
 - `meshcfd.gui.numerics_panel` edits reconstruction, limiter, flux,

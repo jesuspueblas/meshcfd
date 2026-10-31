@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 BOUNDARY_TYPES = (
     "Wall",
@@ -66,6 +67,7 @@ class Case:
     mesh: FiniteVolumeMesh | None = None
     boundary_conditions: list[BoundaryCondition] = field(default_factory=list)
     numerics: NumericalSettings = field(default_factory=NumericalSettings)
+    mesh_path: Path | None = None
 
     def __post_init__(self) -> None:
         if self.mesh is not None and not self.boundary_conditions:
@@ -74,12 +76,15 @@ class Case:
                 for patch in self.mesh.patches
             ]
 
-    def set_mesh(self, mesh: FiniteVolumeMesh) -> None:
+    def set_mesh(
+        self, mesh: FiniteVolumeMesh, mesh_path: str | Path | None = None
+    ) -> None:
         previous = {
             condition.patch_name: condition
             for condition in self.boundary_conditions
         }
         self.mesh = mesh
+        self.mesh_path = Path(mesh_path).resolve() if mesh_path is not None else None
         self.boundary_conditions = [
             BoundaryCondition(
                 patch_id=patch.id,

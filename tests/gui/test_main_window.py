@@ -83,6 +83,7 @@ def test_import_mesh_action_loads_patches_and_displays_mesh(
     window._on_import_mesh()
 
     assert window.case.mesh is not None
+    assert window.case.mesh_path == mesh_path.resolve()
     assert len(window.boundary_panel.case.boundary_conditions) == 4
     assert window.canvas.mesh is window.case.mesh
     assert window._dirty
@@ -111,7 +112,9 @@ def test_run_action_reports_solver_placeholder(qtbot, monkeypatch):
 def test_case_save_and_open(qtbot, monkeypatch, tmp_path):
     window = MainWindow()
     qtbot.addWidget(window)
-    window.case.set_mesh(make_mesh())
+    mesh_path = tmp_path / "mesh.json"
+    mesh_path.write_text(json.dumps(mesh_to_dict(make_mesh())), encoding="utf-8")
+    window.case.set_mesh(make_mesh(), mesh_path)
     window.boundary_panel.set_case(window.case)
     case_path = tmp_path / "saved.mcf.json"
     monkeypatch.setattr(
@@ -122,6 +125,7 @@ def test_case_save_and_open(qtbot, monkeypatch, tmp_path):
     window._on_save_as()
 
     assert case_path.exists()
+    assert json.loads(case_path.read_text(encoding="utf-8"))["mesh"] == "mesh.json"
     assert not window._dirty
     assert window.current_path == case_path
 
@@ -133,5 +137,6 @@ def test_case_save_and_open(qtbot, monkeypatch, tmp_path):
     window._on_open()
 
     assert window.case.mesh is not None
+    assert window.case.mesh_path == mesh_path.resolve()
     assert len(window.case.boundary_conditions) == 4
     assert window.current_path == case_path

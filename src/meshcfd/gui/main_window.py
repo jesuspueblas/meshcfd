@@ -265,7 +265,7 @@ class MainWindow(QMainWindow):
         except (OSError, UnicodeError, MeshImportError) as error:
             QMessageBox.critical(self, "Mesh Import Error", str(error))
             return
-        self.case.set_mesh(mesh)
+        self.case.set_mesh(mesh, Path(filename))
         self.canvas.set_mesh(mesh)
         self.boundary_panel.set_case(self.case)
         self._update_mesh_info()
