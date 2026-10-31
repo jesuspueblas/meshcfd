@@ -14,6 +14,7 @@ from meshcfd.core.model import (
     PeriodicBoundaryPair,
 )
 from meshcfd.core.periodic import detect_periodic_pair
+from meshcfd.core.solver import SolverError, SolverResult, solve_case
 
 __all__ = [
     "BOUNDARY_TYPES",
@@ -26,6 +27,9 @@ __all__ = [
     "NumericalSettings",
     "PeriodicBoundaryPair",
     "RECONSTRUCTION_SCHEMES",
+    "SolverError",
+    "SolverResult",
     "TIME_INTEGRATION_SCHEMES",
     "detect_periodic_pair",
+    "solve_case",
 ]

@@ -7,9 +7,10 @@ from meshcfd.core.model import (
     FiniteVolumeMesh,
     InitialConditionBlock,
     MeshPatch,
+    NumericalSettings,
     PeriodicBoundaryPair,
 )
-from meshcfd.core.periodic import detect_periodic_pair
+from meshcfd.core.periodic import detect_periodic_pair, match_periodic_faces
 from meshcfd.io.mesh_io import mesh_from_dict, mesh_to_dict
 from meshcfd.io.project_io import case_from_dict, case_to_dict, load_case, save_case
 
@@ -53,6 +54,7 @@ def test_case_round_trip_keeps_mesh_and_setup(tmp_path):
     }
     case.numerics.reconstruction = "MUSCL parabolic"
     case.numerics.cfl = 0.8
+    case.numerics.end_time = 3.5
     path = tmp_path / "channel.mcf.json"
 
     save_case(path, case)
@@ -62,6 +64,7 @@ def test_case_round_trip_keeps_mesh_and_setup(tmp_path):
     assert len(restored.boundary_conditions) == 4
     assert restored.boundary_conditions[1].values["velocity_x"] == 80.0
     assert restored.numerics.reconstruction == "MUSCL parabolic"
+    assert restored.numerics.end_time == 3.5
 
 
 def test_case_saves_relative_mesh_reference_and_reloads_mesh(tmp_path):
@@ -75,7 +78,7 @@ def test_case_saves_relative_mesh_reference_and_reloads_mesh(tmp_path):
     save_case(case_path, case)
 
     saved_data = json.loads(case_path.read_text(encoding="utf-8"))
-    assert saved_data["version"] == 4
+    assert saved_data["version"] == 5
     assert saved_data["mesh"] == "../mesh.json"
     assert isinstance(saved_data["mesh"], str)
 
@@ -148,7 +151,22 @@ def test_periodic_pair_detection_and_case_round_trip(tmp_path):
     assert restored.periodic_pairs == case.periodic_pairs
     assert restored.boundary_conditions[1].kind == "Periodic"
     assert restored.boundary_conditions[3].kind == "Periodic"
-    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 4
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 5
+
+
+def test_version_four_periodic_case_defaults_end_time():
+    case = Case(name="periodic", mesh=make_mesh())
+    case.boundary_conditions[1].kind = "Periodic"
+    case.boundary_conditions[3].kind = "Periodic"
+    case.periodic_pairs.append(PeriodicBoundaryPair(1, 3, "x", 1.0))
+    data = case_to_dict(case)
+    data["version"] = 4
+    data["numerics"].pop("end_time")
+
+    restored = case_from_dict(data)
+
+    assert restored.periodic_pairs == case.periodic_pairs
+    assert restored.numerics.end_time == NumericalSettings().end_time
 
 
 def test_periodic_pair_detection_rejects_nonmatching_patches():
@@ -171,6 +189,36 @@ def test_periodic_pair_detection_rejects_different_face_geometry():
 
     with pytest.raises(ValueError, match="matching translation"):
         detect_periodic_pair(mesh, 0, 1)
+
+
+def test_periodic_pair_detection_tolerates_coordinate_noise_and_face_order():
+    y = (0.0, 0.25, 0.5, 0.75, 1.0)
+    left_x = (0.0, 3e-14, -2e-14, 4e-14, -1e-14)
+    right_x = (1.0 + 2e-14, 1.0 - 3e-14, 1.0 + 1e-14, 1.0 - 1e-14, 1.0 + 3e-14)
+    points = tuple(zip(left_x, y)) + tuple(zip(right_x, y))
+    left_faces = tuple((index, index + 1) for index in range(4))
+    right_faces = tuple(
+        (6 + index, 5 + index) for index in range(3, -1, -1)
+    )
+    mesh = FiniteVolumeMesh(
+        points=points,
+        cells=(),
+        faces=left_faces + right_faces,
+        face_owners=(),
+        face_neighbours=(),
+        face_patch_ids=(),
+        patches=(
+            MeshPatch(0, "inlet", (0, 1, 2, 3)),
+            MeshPatch(1, "outlet", (4, 5, 6, 7)),
+        ),
+        cell_face_ids=(),
+        cell_face_signs=(),
+    )
+
+    assert detect_periodic_pair(mesh, 0, 1) == ("x", pytest.approx(1.0))
+    pairs, shift = match_periodic_faces(mesh, 0, 1)
+    assert set(pairs) == {(0, 7), (1, 6), (2, 5), (3, 4)}
+    assert shift == pytest.approx((1.0, 0.0))
 
 
 def test_case_save_rejects_inconsistent_periodic_pitch():

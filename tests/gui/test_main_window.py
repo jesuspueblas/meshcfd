@@ -57,12 +57,14 @@ def test_boundary_and_numerical_controls_update_case(qtbot):
     velocity = window.boundary_panel.value_controls["velocity_x"]
     velocity.setValue(75.0)
     velocity.editingFinished.emit()
-    window.numerics_panel.reconstruction_combo.setCurrentText("MUSCL parabolic")
+    window.numerics_panel.reconstruction_combo.setCurrentText("First order")
+    window.numerics_panel.end_time_spin.setValue(2.5)
 
     condition = window.case.boundary_conditions[1]
     assert condition.kind == "Velocity Inlet"
     assert condition.values["velocity_x"] == 75.0
-    assert window.case.numerics.reconstruction == "MUSCL parabolic"
+    assert window.case.numerics.reconstruction == "First order"
+    assert window.case.numerics.end_time == 2.5
     assert window._dirty
     assert window.canvas.selected_patch_id == 1
     before_select = window.canvas.transform()
@@ -151,23 +153,20 @@ def test_import_mesh_action_loads_patches_and_displays_mesh(
     assert window.mesh_info_label.text() == "1 cells | 4 faces | 4 patches"
 
 
-def test_run_action_reports_solver_placeholder(qtbot, monkeypatch):
+def test_run_action_runs_solver_and_displays_solution(qtbot):
     window = MainWindow()
     qtbot.addWidget(window)
     case = Case()
     case.set_mesh(make_mesh())
+    case.numerics.end_time = 1e-3
     window._set_case(case, None)
-    messages = []
-    monkeypatch.setattr(
-        "meshcfd.gui.main_window.QMessageBox.information",
-        lambda *args: messages.append(args[2]),
-    )
 
     window._on_run()
 
-    assert len(messages) == 1
-    assert "not been implemented" in messages[0]
-    assert "no simulation was run" in window.status_label.text()
+    qtbot.waitUntil(lambda: window._solver_worker is None, timeout=5000)
+    assert "Completed at t" in window.status_label.text()
+    assert window.canvas.solution is not None
+    assert window.action_run.isEnabled()
 
 
 def test_case_save_and_open(qtbot, monkeypatch, tmp_path):

@@ -11,6 +11,9 @@ The current version provides:
 - Per-patch boundary-condition setup.
 - Translational periodic boundaries, with automatic patch compatibility checks
   and pitch detection along the x or y axis.
+- Transient finite-volume integration of the 2D ideal-gas Euler equations,
+  with Rusanov, HLLC, and Roe fluxes; explicit Euler, RK2, and RK3; and
+  first-order or limited MUSCL-linear reconstruction.
 - Spatial initial-condition blocks with safe expressions in `x` and `y`.
 - Initial-solution preview by cell, with selectable variable, palette, and
   linear or logarithmic color scale, automatic or manually specified limits,
@@ -38,8 +41,33 @@ field values and positive limits. Enable the color-bar icon to display a
 floating legend over the mesh; drag the legend itself to move it, use its
 bottom-right grip to resize it, and select horizontal or vertical orientation.
 
-The CFD solver is not implemented yet. The Run action is an explicit
-placeholder and does not start a simulation.
+The transient solver currently supports periodic, inviscid slip-wall, and
+symmetry boundaries. Other boundary types and the selectable MUSCL-parabolic
+reconstruction are not implemented and are reported as solver errors. Runs
+stop at the configured End time or maximum time-step count; the residual is
+reported for monitoring and does not terminate an unsteady run.
+
+### Isentropic Euler vortex test
+
+For a nondimensional vortex on a `[0, 10] x [0, 10]` domain, pair the opposing
+x and y boundary patches periodically. Use `gamma = 1.4`, `CFL = 0.4`,
+`End time = 10`, and increase the maximum time steps as needed. Add an initial
+condition block over `True` with `beta = 5`, center `(5, 5)`, and freestream
+`rho = p = u = v = 1`. Enter the following field expressions (`r²` is expanded
+because block fields accept expressions in `x` and `y` only):
+
+- Density:
+  `(1 - 0.4*25/(8*1.4*pi^2)*exp(1-((x-5)^2+(y-5)^2)))^(1/0.4)`
+- Velocity X:
+  `1 - 5/(2*pi)*exp(0.5*(1-((x-5)^2+(y-5)^2)))*(y-5)`
+- Velocity Y:
+  `1 + 5/(2*pi)*exp(0.5*(1-((x-5)^2+(y-5)^2)))*(x-5)`
+- Pressure:
+  `(1 - 0.4*25/(8*1.4*pi^2)*exp(1-((x-5)^2+(y-5)^2)))^(1.4/0.4)`
+
+The vortex should return to its initial position after one period. Results are
+cell-centered; use the solution visualization controls to inspect the evolved
+field.
 
 ## Installation
 

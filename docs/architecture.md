@@ -12,7 +12,15 @@ gui (PyQt5)         io (JSON)
 - `meshcfd.core.model` defines the case, finite-volume mesh, boundary
   conditions, initial-condition blocks, and numerical settings.
 - `meshcfd.core.periodic` checks that two boundary patches match after a
-  translation along x or y, then returns the axis and pitch.
+  translation along x or y, then returns the axis, pitch, and matching face
+  pairs.
+- `meshcfd.core.euler` converts ideal-gas states and evaluates Rusanov, HLLC,
+  and Roe numerical fluxes.
+- `meshcfd.core.solver` assembles conservative finite-volume residuals on
+  polygonal cells and advances them with explicit Euler, SSP-RK2, or SSP-RK3.
+  Periodic partners share one conservative interface flux; walls and symmetry
+  use reflected states. MUSCL-linear reconstruction supports the configured
+  limiters.
 - `meshcfd.core.expressions` safely parses mathematical expressions in `x` and
   `y`; `meshcfd.core.initial_conditions` evaluates blocks at cell centroids,
   using the last matching block and a configurable base state elsewhere.
@@ -21,8 +29,8 @@ gui (PyQt5)         io (JSON)
   and preserves face, cell, and patch connectivity.
 - `meshcfd.io.project_io` saves mesh references relative to the case file and
   loads them when opening a case. Cases without a source mesh file can still
-  embed their mesh; versions 1 through 3 remain supported, and version 4
-  stores periodic patch pairs.
+  embed their mesh; versions 1 through 4 remain supported, and version 5
+  stores periodic patch pairs and the transient end time.
 - `meshcfd.gui.canvas` displays cells and colored patch faces.
 - `meshcfd.gui.visualization_panel` selects the initial-solution field,
   palette, linear or logarithmic scale, automatic or manual color limits, and
@@ -38,11 +46,12 @@ gui (PyQt5)         io (JSON)
 - `meshcfd.gui.boundary_panel` configures one boundary condition per patch and
   creates compatible x- or y-periodic pairs with their detected pitch.
 - `meshcfd.gui.numerics_panel` edits reconstruction, limiter, flux,
-  time-integration, and gas parameters.
+  time-integration, run duration, and gas parameters.
 - `meshcfd.gui.initial_conditions_panel` edits the base state and ordered
   spatial initial-condition blocks.
-- `meshcfd.gui.main_window` coordinates case actions, panels, and the
-  not-yet-implemented solver action.
+- `meshcfd.gui.main_window` coordinates case actions, panels, and runs the
+  solver on a background thread, displaying completed cell-centered fields.
 
-The GUI and file formats are initial scaffolding. No flow equations,
-reconstruction, flux evaluation, or time integration are implemented yet.
+The solver handles transient inviscid ideal-gas Euler flow. Pressure inlet,
+pressure outlet, velocity inlet, far-field, and MUSCL-parabolic options are
+not yet supported by the solver and produce explicit errors if selected.

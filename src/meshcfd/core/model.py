@@ -65,6 +65,7 @@ class NumericalSettings:
     time_integration: str = "Explicit RK2"
     cfl: float = 0.5
     max_iterations: int = 1000
+    end_time: float = 1.0
     residual_tolerance: float = 1e-6
     gamma: float = 1.4
     gas_constant: float = 287.05

@@ -28,6 +28,11 @@ class NumericsPanel(QWidget):
         form = QFormLayout(self)
 
         self.reconstruction_combo = self._combo(RECONSTRUCTION_SCHEMES)
+        parabolic_index = self.reconstruction_combo.findText("MUSCL parabolic")
+        self.reconstruction_combo.model().item(parabolic_index).setEnabled(False)
+        self.reconstruction_combo.setToolTip(
+            "MUSCL parabolic is reserved for a future solver version."
+        )
         self.limiter_combo = self._combo(LIMITER_SCHEMES)
         self.flux_combo = self._combo(FLUX_SCHEMES)
         self.time_integration_combo = self._combo(TIME_INTEGRATION_SCHEMES)
@@ -36,14 +41,20 @@ class NumericsPanel(QWidget):
         form.addRow("Convective flux:", self.flux_combo)
         form.addRow("Time integration:", self.time_integration_combo)
 
-        self.cfl_spin = self._double_spin(0.001, 5.0, 0.5, 3)
+        self.cfl_spin = self._double_spin(0.001, 1.0, 0.5, 3)
         self.iterations_spin = QSpinBox(self)
         self.iterations_spin.setRange(1, 10000000)
+        self.end_time_spin = self._double_spin(1e-12, 1e12, 1.0, 8)
         self.residual_spin = self._double_spin(1e-14, 1.0, 1e-6, 12)
+        self.residual_spin.setToolTip(
+            "Residual is reported for monitoring; transient runs stop at End time "
+            "or Maximum time steps."
+        )
         self.gamma_spin = self._double_spin(1.0001, 2.0, 1.4, 4)
         self.gas_constant_spin = self._double_spin(1e-6, 1e9, 287.05, 4)
         form.addRow("CFL number:", self.cfl_spin)
-        form.addRow("Maximum iterations:", self.iterations_spin)
+        form.addRow("Maximum time steps:", self.iterations_spin)
+        form.addRow("End time:", self.end_time_spin)
         form.addRow("Residual tolerance:", self.residual_spin)
         form.addRow("Specific heat ratio:", self.gamma_spin)
         form.addRow("Gas constant:", self.gas_constant_spin)
@@ -56,6 +67,7 @@ class NumericsPanel(QWidget):
             self.time_integration_combo,
             self.cfl_spin,
             self.iterations_spin,
+            self.end_time_spin,
             self.residual_spin,
             self.gamma_spin,
             self.gas_constant_spin,
@@ -70,6 +82,7 @@ class NumericsPanel(QWidget):
         for control in (
             self.cfl_spin,
             self.iterations_spin,
+            self.end_time_spin,
             self.residual_spin,
             self.gamma_spin,
             self.gas_constant_spin,
@@ -102,6 +115,7 @@ class NumericsPanel(QWidget):
         self.time_integration_combo.setCurrentText(settings.time_integration)
         self.cfl_spin.setValue(settings.cfl)
         self.iterations_spin.setValue(settings.max_iterations)
+        self.end_time_spin.setValue(settings.end_time)
         self.residual_spin.setValue(settings.residual_tolerance)
         self.gamma_spin.setValue(settings.gamma)
         self.gas_constant_spin.setValue(settings.gas_constant)
@@ -116,6 +130,7 @@ class NumericsPanel(QWidget):
         settings.time_integration = self.time_integration_combo.currentText()
         settings.cfl = self.cfl_spin.value()
         settings.max_iterations = self.iterations_spin.value()
+        settings.end_time = self.end_time_spin.value()
         settings.residual_tolerance = self.residual_spin.value()
         settings.gamma = self.gamma_spin.value()
         settings.gas_constant = self.gas_constant_spin.value()

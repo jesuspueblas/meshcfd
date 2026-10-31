@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import copy
 import sys
 from pathlib import Path
 
-from PyQt5.QtCore import QSize, Qt
+from PyQt5.QtCore import QSize, Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QColor, QIcon, QKeySequence, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QAction,
@@ -21,6 +22,7 @@ from PyQt5.QtWidgets import (
 
 from meshcfd.core.initial_conditions import evaluate_initial_conditions
 from meshcfd.core.model import Case, InitialState
+from meshcfd.core.solver import SolverResult, solve_case
 from meshcfd.gui.boundary_panel import BoundaryPanel
 from meshcfd.gui.canvas import MeshCanvas
 from meshcfd.gui.initial_conditions_panel import InitialConditionsPanel
@@ -30,12 +32,42 @@ from meshcfd.io.mesh_io import MeshImportError, load_mesh
 from meshcfd.io.project_io import load_case, save_case
 
 
+class _SolverWorker(QThread):
+    progress = pyqtSignal(int, float)
+
+    def __init__(self, case: Case, initial_states) -> None:
+        super().__init__()
+        self.case = case
+        self.initial_states = initial_states
+        self.result: SolverResult | None = None
+        self.error: str | None = None
+
+    def run(self) -> None:
+        try:
+            self.result = solve_case(
+                self.case,
+                self.initial_states,
+                self._report_progress,
+                self.isInterruptionRequested,
+            )
+        except Exception as error:
+            self.error = str(error)
+
+    def _report_progress(self, step: int, time: float) -> None:
+        if step == 1 or step % 10 == 0:
+            self.progress.emit(step, time)
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.case = Case()
         self.current_path: Path | None = None
         self._initial_solution: tuple[InitialState, ...] | None = None
+        self._simulation_solution: tuple[InitialState, ...] | None = None
+        self._case_revision = 0
+        self._run_revision: int | None = None
+        self._solver_worker: _SolverWorker | None = None
         self._dirty = False
         self.resize(1400, 850)
 
@@ -79,8 +111,10 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.mesh_info_label)
 
         self.boundary_panel.changed.connect(self._mark_dirty)
+        self.boundary_panel.changed.connect(self._clear_simulation_solution)
         self.boundary_panel.patch_selected.connect(self.canvas.select_patch)
         self.numerics_panel.changed.connect(self._mark_dirty)
+        self.numerics_panel.changed.connect(self._clear_simulation_solution)
         self.initial_conditions_panel.changed.connect(self._mark_dirty)
         self.initial_conditions_panel.changed.connect(self._refresh_solution)
         self.visualization_panel.changed.connect(self._update_visualization)
@@ -228,12 +262,15 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"MeshCFD - {filename}{marker}")
 
     def _mark_dirty(self) -> None:
+        self._case_revision += 1
         self._dirty = True
         self._update_title()
 
     def _set_case(self, case: Case, path: Path | None) -> None:
+        self._case_revision += 1
         self.case = case
         self.current_path = path
+        self._simulation_solution = None
         self._dirty = False
         self.canvas.set_mesh(case.mesh)
         self.boundary_panel.set_case(case)
@@ -249,6 +286,7 @@ class MainWindow(QMainWindow):
         self._update_visualization()
 
     def _refresh_solution(self) -> None:
+        self._simulation_solution = None
         if self.case.mesh is None:
             self._initial_solution = None
             self.canvas.set_solution(None)
@@ -271,10 +309,16 @@ class MainWindow(QMainWindow):
             return
         self._update_visualization()
 
+    def _clear_simulation_solution(self) -> None:
+        self._simulation_solution = None
+        self._update_visualization()
+
     def _update_visualization(self, *_) -> None:
         variable = self.visualization_panel.variable_combo.currentText()
         palette = self.visualization_panel.palette_combo.currentText()
-        self.canvas.set_solution(self._initial_solution)
+        self.canvas.set_solution(
+            self._simulation_solution or self._initial_solution
+        )
         try:
             values = self.canvas.set_display_options(
                 show_grid=self.action_grid.isChecked(),
@@ -429,16 +473,63 @@ class MainWindow(QMainWindow):
                 self, "No Mesh", "Import a finite-volume mesh before setting up a run."
             )
             return
-        QMessageBox.information(
-            self,
-            "Solver Not Available",
-            "The case setup interface is ready, but the CFD solver has not "
-            "been implemented yet.",
-        )
-        self.status_label.setText("Solver not implemented yet; no simulation was run.")
+        if self._solver_worker is not None:
+            return
+        snapshot = copy.deepcopy(self.case)
+        initial_states = copy.deepcopy(self._initial_solution)
+        self._run_revision = self._case_revision
+        worker = _SolverWorker(snapshot, initial_states)
+        self._solver_worker = worker
+        worker.progress.connect(self._on_solver_progress)
+        worker.finished.connect(self._on_solver_finished)
+        self.action_run.setEnabled(False)
+        self.status_label.setText("Solver running...")
+        worker.start()
+
+    def _on_solver_progress(self, step: int, time: float) -> None:
+        self.status_label.setText(f"Solver running: step {step}, t = {time:.6g}")
+
+    def _on_solver_finished(self) -> None:
+        worker = self._solver_worker
+        if worker is None:
+            return
+        self._solver_worker = None
+        self.action_run.setEnabled(True)
+        worker.deleteLater()
+        if worker.error is not None:
+            self.status_label.setText("Solver failed.")
+            QMessageBox.critical(self, "Solver Error", worker.error)
+            return
+        if self._run_revision != self._case_revision:
+            self.status_label.setText(
+                "Run finished for older case settings; results were discarded."
+            )
+            return
+        result = worker.result
+        if result is None:
+            self.status_label.setText("Solver failed without a result.")
+            QMessageBox.critical(
+                self, "Solver Error", "The solver finished without producing a result."
+            )
+            return
+        self._simulation_solution = result.states
+        self._update_visualization()
+        if result.completed:
+            self.status_label.setText(
+                f"Completed at t = {result.time:.6g} in {result.steps} steps "
+                f"(residual {result.residual:.3e})."
+            )
+        else:
+            self.status_label.setText(
+                f"Stopped at t = {result.time:.6g} after {result.steps} steps "
+                f"before end time {self.case.numerics.end_time:.6g}."
+            )
 
     def closeEvent(self, event) -> None:
         if self._confirm_discard_changes():
+            if self._solver_worker is not None:
+                self._solver_worker.requestInterruption()
+                self._solver_worker.wait()
             event.accept()
         else:
             event.ignore()

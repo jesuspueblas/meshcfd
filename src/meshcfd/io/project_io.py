@@ -28,12 +28,13 @@ from meshcfd.core.periodic import detect_periodic_pair
 from meshcfd.io.mesh_io import load_mesh, mesh_from_dict, mesh_to_dict
 
 PROJECT_FORMAT = "meshcfd-case"
-PROJECT_VERSION = 4
+PROJECT_VERSION = 5
 
 
 def case_to_dict(
     case: Case, case_path: str | Path | None = None
 ) -> dict[str, Any]:
+    end_time = _positive_float(case.numerics.end_time, "End time")
     _validate_periodic_pairs(
         case.mesh, case.boundary_conditions, case.periodic_pairs
     )
@@ -84,6 +85,7 @@ def case_to_dict(
             "time_integration": case.numerics.time_integration,
             "cfl": case.numerics.cfl,
             "max_iterations": case.numerics.max_iterations,
+            "end_time": end_time,
             "residual_tolerance": case.numerics.residual_tolerance,
             "gamma": case.numerics.gamma,
             "gas_constant": case.numerics.gas_constant,
@@ -96,9 +98,15 @@ def case_from_dict(
     data: dict[str, Any], case_path: str | Path | None = None
 ) -> Case:
     version = data.get("version")
-    if data.get("format") != PROJECT_FORMAT or version not in (1, 2, 3, PROJECT_VERSION):
+    if data.get("format") != PROJECT_FORMAT or version not in (
+        1,
+        2,
+        3,
+        4,
+        PROJECT_VERSION,
+    ):
         raise ValueError(
-            f"Unsupported case format. Expected MeshCFD case version 1, 2, 3 or "
+            f"Unsupported case format. Expected MeshCFD case version 1 through "
             f"{PROJECT_VERSION}."
         )
     name = data.get("name")
@@ -183,6 +191,9 @@ def case_from_dict(
         max_iterations=_positive_integer(
             raw_numerics.get("max_iterations", defaults.max_iterations),
             "Maximum iterations",
+        ),
+        end_time=_positive_float(
+            raw_numerics.get("end_time", defaults.end_time), "End time"
         ),
         residual_tolerance=_positive_float(
             raw_numerics.get(

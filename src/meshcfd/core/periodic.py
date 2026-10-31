@@ -54,7 +54,7 @@ def detect_periodic_pair(
         translated_edges = _translate_edges(
             edges_a, translation if axis == 0 else 0.0, translation if axis == 1 else 0.0
         )
-        if _same_edges(translated_edges, edges_b, tolerance):
+        if _same_edges(translated_edges, edges_b, tolerance, orthogonal_axis):
             matches.append((name, abs(translation)))
 
     if len(matches) != 1:
@@ -65,6 +65,55 @@ def detect_periodic_pair(
     if not math.isfinite(pitch) or pitch <= 0.0:
         raise ValueError("Periodic pitch must be positive and finite.")
     return axis, pitch
+
+
+def match_periodic_faces(
+    mesh: FiniteVolumeMesh, patch_a_id: int, patch_b_id: int
+) -> tuple[tuple[tuple[int, int], ...], tuple[float, float]]:
+    axis, _ = detect_periodic_pair(mesh, patch_a_id, patch_b_id)
+    patches = {patch.id: patch for patch in mesh.patches}
+    patch_a, patch_b = patches[patch_a_id], patches[patch_b_id]
+    edges_a = _patch_edges(mesh, patch_a)
+    edges_b = _patch_edges(mesh, patch_b)
+    bounds_a, bounds_b = _bounds(edges_a), _bounds(edges_b)
+    axis_index = 0 if axis == "x" else 1
+    tangent_axis = 1 - axis_index
+    translation = (
+        (bounds_b[axis_index][0] + bounds_b[axis_index][1])
+        - (bounds_a[axis_index][0] + bounds_a[axis_index][1])
+    ) / 2.0
+    shift = (translation, 0.0) if axis == "x" else (0.0, translation)
+    points = tuple(point for edge in edges_a + edges_b for point in edge)
+    scale = max(
+        1.0,
+        max(abs(value) for point in points for value in point),
+        *(
+            upper - lower
+            for lower, upper in _bounds(edges_a + edges_b)
+        ),
+    )
+    tolerance = scale * 1e-9
+    translated_edges = _translate_edges(edges_a, *shift)
+    ordered_a = sorted(
+        zip(patch_a.face_ids, translated_edges),
+        key=lambda item: _edge_sort_key(item[1], tangent_axis),
+    )
+    ordered_b = sorted(
+        zip(patch_b.face_ids, edges_b),
+        key=lambda item: _edge_sort_key(item[1], tangent_axis),
+    )
+    if not _same_edges(
+        tuple(edge for _face_id, edge in ordered_a),
+        tuple(edge for _face_id, edge in ordered_b),
+        tolerance,
+        tangent_axis,
+    ):
+        raise ValueError("Periodic patch faces do not have a unique matching.")
+    matches = tuple(
+        (face_a, face_b)
+        for (face_a, _edge_a), (face_b, _edge_b) in zip(ordered_a, ordered_b)
+    )
+    return matches, shift
 
 
 def _patch_edges(
@@ -101,12 +150,41 @@ def _same_edges(
     edges_a: tuple[tuple[tuple[float, float], tuple[float, float]], ...],
     edges_b: tuple[tuple[tuple[float, float], tuple[float, float]], ...],
     tolerance: float,
+    sort_axis: int,
 ) -> bool:
-    ordered_a = sorted(edges_a)
-    ordered_b = sorted(edges_b)
+    ordered_a = sorted(edges_a, key=lambda edge: _edge_sort_key(edge, sort_axis))
+    ordered_b = sorted(edges_b, key=lambda edge: _edge_sort_key(edge, sort_axis))
     return all(
-        abs(point_a[axis] - point_b[axis]) <= tolerance
+        _same_edge(edge_a, edge_b, tolerance)
         for edge_a, edge_b in zip(ordered_a, ordered_b)
+    )
+
+
+def _edge_sort_key(
+    edge: tuple[tuple[float, float], tuple[float, float]], axis: int
+) -> tuple[float, float, float, float]:
+    first, second = edge
+    return (
+        (first[axis] + second[axis]) / 2.0,
+        abs(second[axis] - first[axis]),
+        min(first[axis], second[axis]),
+        max(first[axis], second[axis]),
+    )
+
+
+def _same_edge(
+    edge_a: tuple[tuple[float, float], tuple[float, float]],
+    edge_b: tuple[tuple[float, float], tuple[float, float]],
+    tolerance: float,
+) -> bool:
+    direct_match = all(
+        abs(point_a[axis] - point_b[axis]) <= tolerance
         for point_a, point_b in zip(edge_a, edge_b)
         for axis in (0, 1)
     )
+    reverse_match = all(
+        abs(point_a[axis] - point_b[axis]) <= tolerance
+        for point_a, point_b in zip(edge_a, reversed(edge_b))
+        for axis in (0, 1)
+    )
+    return direct_match or reverse_match
