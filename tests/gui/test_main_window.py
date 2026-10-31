@@ -110,6 +110,7 @@ def test_import_mesh_action_loads_patches_and_displays_mesh(
 
     assert window.case.mesh is not None
     assert window.case.mesh_path == mesh_path.resolve()
+    assert window.canvas.solution is not None
     assert len(window.boundary_panel.case.boundary_conditions) == 4
     assert window.canvas.mesh is window.case.mesh
     assert window._dirty

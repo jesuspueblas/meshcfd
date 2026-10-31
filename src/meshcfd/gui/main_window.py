@@ -19,11 +19,13 @@ from PyQt5.QtWidgets import (
     QToolBar,
 )
 
-from meshcfd.core.model import Case
+from meshcfd.core.initial_conditions import evaluate_initial_conditions
+from meshcfd.core.model import Case, InitialState
 from meshcfd.gui.boundary_panel import BoundaryPanel
 from meshcfd.gui.canvas import MeshCanvas
 from meshcfd.gui.initial_conditions_panel import InitialConditionsPanel
 from meshcfd.gui.numerics_panel import NumericsPanel
+from meshcfd.gui.visualization_panel import VisualizationPanel
 from meshcfd.io.mesh_io import MeshImportError, load_mesh
 from meshcfd.io.project_io import load_case, save_case
 
@@ -33,6 +35,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.case = Case()
         self.current_path: Path | None = None
+        self._initial_solution: tuple[InitialState, ...] | None = None
         self._dirty = False
         self.resize(1400, 850)
 
@@ -53,6 +56,10 @@ class MainWindow(QMainWindow):
             Qt.RightDockWidgetArea,
             self.initial_conditions_panel,
         )
+        self.visualization_panel = VisualizationPanel(self)
+        self.visualization_dock = self._add_dock(
+            "Solution View", Qt.RightDockWidgetArea, self.visualization_panel
+        )
         self.boundary_panel.set_case(self.case)
         self.numerics_panel.set_case(self.case)
         self.initial_conditions_panel.set_case(self.case)
@@ -66,6 +73,8 @@ class MainWindow(QMainWindow):
         self.boundary_panel.patch_selected.connect(self.canvas.select_patch)
         self.numerics_panel.changed.connect(self._mark_dirty)
         self.initial_conditions_panel.changed.connect(self._mark_dirty)
+        self.initial_conditions_panel.changed.connect(self._refresh_solution)
+        self.visualization_panel.changed.connect(self._update_visualization)
 
         self._create_actions()
         self._create_menus()
@@ -123,10 +132,17 @@ class MainWindow(QMainWindow):
         simulation_menu.addAction(self.action_run)
 
         view_menu = self.menuBar().addMenu("&View")
+        self.action_grid = QAction("Show Grid", self)
+        self.action_grid.setCheckable(True)
+        self.action_grid.setChecked(True)
+        self.action_grid.triggered.connect(self._on_toggle_grid)
+        view_menu.addAction(self.action_grid)
+        view_menu.addSeparator()
         view_menu.addAction(self.action_fit_mesh)
         view_menu.addAction(self.boundary_dock.toggleViewAction())
         view_menu.addAction(self.numerics_dock.toggleViewAction())
         view_menu.addAction(self.initial_conditions_dock.toggleViewAction())
+        view_menu.addAction(self.visualization_dock.toggleViewAction())
 
     def _create_toolbar(self) -> None:
         toolbar = QToolBar("Case", self)
@@ -150,6 +166,7 @@ class MainWindow(QMainWindow):
             (self.action_save, QStyle.SP_DialogSaveButton),
             (self.action_import_mesh, QStyle.SP_DirOpenIcon),
             (self.action_fit_mesh, QStyle.SP_DesktopIcon),
+            (self.action_grid, QStyle.SP_FileDialogDetailedView),
             (self.action_run, QStyle.SP_MediaPlay),
         ):
             action.setIcon(self.style().standardIcon(icon))
@@ -176,7 +193,60 @@ class MainWindow(QMainWindow):
         self.numerics_panel.set_case(case)
         self.initial_conditions_panel.set_case(case)
         self._update_mesh_info()
+        self._refresh_solution()
         self._update_title()
+
+    def _on_toggle_grid(self, _checked: bool) -> None:
+        self.canvas.show_grid = _checked
+        self.canvas.viewport().update()
+        self._update_visualization()
+
+    def _refresh_solution(self) -> None:
+        if self.case.mesh is None:
+            self._initial_solution = None
+            self.canvas.set_solution(None)
+            self._update_visualization()
+            return
+        try:
+            self._initial_solution = evaluate_initial_conditions(
+                self.case.mesh, self.case.initial_conditions
+            )
+        except ValueError as error:
+            self._initial_solution = None
+            self.canvas.set_solution(None)
+            self._update_visualization()
+            self.visualization_panel.set_result(
+                None,
+                self.visualization_panel.palette_combo.currentText(),
+                str(error),
+            )
+            return
+        self._update_visualization()
+
+    def _update_visualization(self, *_) -> None:
+        variable = self.visualization_panel.variable_combo.currentText()
+        palette = self.visualization_panel.palette_combo.currentText()
+        self.canvas.set_solution(self._initial_solution)
+        try:
+            values = self.canvas.set_display_options(
+                show_grid=self.action_grid.isChecked(),
+                show_mesh=self.visualization_panel.show_mesh_checkbox.isChecked(),
+                solution_variable=variable,
+                color_map=palette,
+                color_scale=self.visualization_panel.scale_combo.currentText(),
+            )
+        except ValueError as error:
+            self.canvas.set_solution(None)
+            self.canvas.set_display_options(
+                show_grid=self.action_grid.isChecked(),
+                show_mesh=self.visualization_panel.show_mesh_checkbox.isChecked(),
+                solution_variable=variable,
+                color_map=palette,
+                color_scale=self.visualization_panel.scale_combo.currentText(),
+            )
+            self.visualization_panel.set_result(None, palette, str(error))
+            return
+        self.visualization_panel.set_result(values, palette)
 
     def _update_mesh_info(self) -> None:
         if self.case.mesh is None:
@@ -282,6 +352,7 @@ class MainWindow(QMainWindow):
         self.canvas.set_mesh(mesh)
         self.boundary_panel.set_case(self.case)
         self._update_mesh_info()
+        self._refresh_solution()
         self._mark_dirty()
         self.status_label.setText(f"Imported mesh: {Path(filename).name}")
 

@@ -22,6 +22,9 @@ gui (PyQt5)         io (JSON)
   embed their mesh; version 1 embedded-mesh and version 2 referenced-mesh
   cases remain supported.
 - `meshcfd.gui.canvas` displays cells and colored patch faces.
+- `meshcfd.gui.visualization_panel` selects the initial-solution field,
+  palette, scale, and mesh-edge visibility; the canvas draws an adaptive
+  background grid and cell-centered solution colors.
 - `meshcfd.gui.boundary_panel` configures one boundary condition per patch.
 - `meshcfd.gui.numerics_panel` edits reconstruction, limiter, flux,
   time-integration, and gas parameters.

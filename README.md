@@ -10,6 +10,8 @@ The current version provides:
   MeshCAD.
 - Per-patch boundary-condition setup.
 - Spatial initial-condition blocks with safe expressions in `x` and `y`.
+- Initial-solution preview by cell, with selectable variable, palette, and
+  linear or logarithmic color scale.
 - Initial numerical controls for MUSCL reconstruction, limiters, fluxes, and
   time integration.
 - New, open, and save case configuration.
@@ -21,6 +23,8 @@ Field expressions support arithmetic, comparisons, and common trigonometric,
 hyperbolic, exponential, logarithmic, and root functions. Blocks are applied in
 order, with later matching blocks taking precedence; cells outside all blocks
 use the configurable base state.
+The View menu and toolbar toggle the background grid; the Solution View panel
+controls the displayed field, color scale, palette, and mesh-edge visibility.
 
 The CFD solver is not implemented yet. The Run action is an explicit
 placeholder and does not start a simulation.
