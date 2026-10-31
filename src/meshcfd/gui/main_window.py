@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from PyQt5.QtCore import QSize, Qt
-from PyQt5.QtGui import QKeySequence
+from PyQt5.QtGui import QColor, QIcon, QKeySequence, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
@@ -41,25 +41,34 @@ class MainWindow(QMainWindow):
 
         self.canvas = MeshCanvas(self)
         self.setCentralWidget(self.canvas)
+        self.setDockNestingEnabled(True)
 
         self.boundary_panel = BoundaryPanel(self)
         self.boundary_dock = self._add_dock(
             "Boundary Conditions", Qt.LeftDockWidgetArea, self.boundary_panel
         )
+        self.initial_conditions_panel = InitialConditionsPanel(self)
+        self.initial_conditions_dock = self._add_dock(
+            "Initial Conditions",
+            Qt.LeftDockWidgetArea,
+            self.initial_conditions_panel,
+        )
+        self.splitDockWidget(
+            self.boundary_dock, self.initial_conditions_dock, Qt.Vertical
+        )
         self.numerics_panel = NumericsPanel(self)
         self.numerics_dock = self._add_dock(
             "Numerical Setup", Qt.RightDockWidgetArea, self.numerics_panel
         )
-        self.initial_conditions_panel = InitialConditionsPanel(self)
-        self.initial_conditions_dock = self._add_dock(
-            "Initial Conditions",
-            Qt.RightDockWidgetArea,
-            self.initial_conditions_panel,
+        self.resizeDocks(
+            [self.boundary_dock, self.initial_conditions_dock],
+            [280, 450],
+            Qt.Vertical,
+        )
+        self.resizeDocks(
+            [self.boundary_dock, self.numerics_dock], [280, 300], Qt.Horizontal
         )
         self.visualization_panel = VisualizationPanel(self)
-        self.visualization_dock = self._add_dock(
-            "Solution View", Qt.RightDockWidgetArea, self.visualization_panel
-        )
         self.boundary_panel.set_case(self.case)
         self.numerics_panel.set_case(self.case)
         self.initial_conditions_panel.set_case(self.case)
@@ -77,8 +86,8 @@ class MainWindow(QMainWindow):
         self.visualization_panel.changed.connect(self._update_visualization)
 
         self._create_actions()
-        self._create_menus()
         self._create_toolbar()
+        self._create_menus()
         self._update_title()
 
     def _add_dock(self, title: str, area, widget) -> QDockWidget:
@@ -117,6 +126,11 @@ class MainWindow(QMainWindow):
         self.action_run = QAction("Run Solver", self)
         self.action_run.triggered.connect(self._on_run)
 
+        self.action_grid = QAction("Show Grid", self)
+        self.action_grid.setCheckable(True)
+        self.action_grid.setChecked(True)
+        self.action_grid.triggered.connect(self._on_toggle_grid)
+
     def _create_menus(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
         for action in (self.action_new, self.action_open, self.action_save, self.action_save_as):
@@ -132,17 +146,13 @@ class MainWindow(QMainWindow):
         simulation_menu.addAction(self.action_run)
 
         view_menu = self.menuBar().addMenu("&View")
-        self.action_grid = QAction("Show Grid", self)
-        self.action_grid.setCheckable(True)
-        self.action_grid.setChecked(True)
-        self.action_grid.triggered.connect(self._on_toggle_grid)
         view_menu.addAction(self.action_grid)
         view_menu.addSeparator()
         view_menu.addAction(self.action_fit_mesh)
         view_menu.addAction(self.boundary_dock.toggleViewAction())
         view_menu.addAction(self.numerics_dock.toggleViewAction())
         view_menu.addAction(self.initial_conditions_dock.toggleViewAction())
-        view_menu.addAction(self.visualization_dock.toggleViewAction())
+        view_menu.addAction(self.visualization_toolbar.toggleViewAction())
 
     def _create_toolbar(self) -> None:
         toolbar = QToolBar("Case", self)
@@ -166,14 +176,51 @@ class MainWindow(QMainWindow):
             (self.action_save, QStyle.SP_DialogSaveButton),
             (self.action_import_mesh, QStyle.SP_DirOpenIcon),
             (self.action_fit_mesh, QStyle.SP_DesktopIcon),
-            (self.action_grid, QStyle.SP_FileDialogDetailedView),
-            (self.action_run, QStyle.SP_MediaPlay),
         ):
             action.setIcon(self.style().standardIcon(icon))
             action.setToolTip(action.text())
             action.setStatusTip(action.text())
             toolbar.addAction(action)
+        self.action_grid.setIcon(self._create_grid_icon(icon_size))
+        self.action_grid.setToolTip(self.action_grid.text())
+        self.action_grid.setStatusTip(self.action_grid.text())
+        toolbar.addAction(self.action_grid)
+        self.action_run.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
+        self.action_run.setToolTip(self.action_run.text())
+        self.action_run.setStatusTip(self.action_run.text())
+        toolbar.addAction(self.action_run)
         toolbar.addSeparator()
+
+        self.visualization_toolbar = QToolBar("Solution View", self)
+        self.visualization_toolbar.setObjectName("solution_view_toolbar")
+        self.visualization_toolbar.setMovable(True)
+        self.visualization_toolbar.setFloatable(True)
+        self.visualization_toolbar.setStyleSheet(
+            "QToolBar { spacing: 4px; padding: 2px; background: #F8FAFC; "
+            "border-bottom: 1px solid #CBD5E1; }"
+        )
+        self.addToolBarBreak(Qt.TopToolBarArea)
+        self.addToolBar(Qt.TopToolBarArea, self.visualization_toolbar)
+        self.visualization_toolbar.addWidget(self.visualization_panel)
+
+    @staticmethod
+    def _create_grid_icon(size: int) -> QIcon:
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        margin = max(2, size // 8)
+        grid = pixmap.rect().adjusted(margin, margin, -margin, -margin)
+        painter.setPen(QPen(QColor("#475569"), max(1, size // 12)))
+        painter.drawRoundedRect(grid, 2, 2)
+        step = grid.width() / 3
+        for index in (1, 2):
+            position = round(grid.left() + step * index)
+            painter.setPen(QPen(QColor("#2563EB"), max(1, size // 14)))
+            painter.drawLine(position, grid.top() + 1, position, grid.bottom() - 1)
+            painter.drawLine(grid.left() + 1, position, grid.right() - 1, position)
+        painter.end()
+        return QIcon(pixmap)
 
     def _update_title(self) -> None:
         filename = self.current_path.name if self.current_path else self.case.name
@@ -218,7 +265,8 @@ class MainWindow(QMainWindow):
             self.visualization_panel.set_result(
                 None,
                 self.visualization_panel.palette_combo.currentText(),
-                str(error),
+                scale=self.visualization_panel.scale_combo.currentText(),
+                error=str(error),
             )
             return
         self._update_visualization()
@@ -234,6 +282,11 @@ class MainWindow(QMainWindow):
                 solution_variable=variable,
                 color_map=palette,
                 color_scale=self.visualization_panel.scale_combo.currentText(),
+                color_range=self.visualization_panel.color_range(),
+                smooth_colors=self.visualization_panel.smooth_colors_checkbox.isChecked(),
+                show_colorbar=self.visualization_panel.show_colorbar_checkbox.isChecked(),
+                colorbar_orientation=self.visualization_panel.colorbar_orientation(),
+                colorbar_variable=variable,
             )
         except ValueError as error:
             self.canvas.set_solution(None)
@@ -243,10 +296,24 @@ class MainWindow(QMainWindow):
                 solution_variable=variable,
                 color_map=palette,
                 color_scale=self.visualization_panel.scale_combo.currentText(),
+                color_range=None,
+                smooth_colors=self.visualization_panel.smooth_colors_checkbox.isChecked(),
+                show_colorbar=self.visualization_panel.show_colorbar_checkbox.isChecked(),
+                colorbar_orientation=self.visualization_panel.colorbar_orientation(),
+                colorbar_variable=variable,
             )
-            self.visualization_panel.set_result(None, palette, str(error))
+            self.visualization_panel.set_result(
+                None,
+                palette,
+                error=str(error),
+                scale=self.visualization_panel.scale_combo.currentText(),
+            )
             return
-        self.visualization_panel.set_result(values, palette)
+        self.visualization_panel.set_result(
+            values,
+            palette,
+            scale=self.visualization_panel.scale_combo.currentText(),
+        )
 
     def _update_mesh_info(self) -> None:
         if self.case.mesh is None:

@@ -11,7 +11,8 @@ The current version provides:
 - Per-patch boundary-condition setup.
 - Spatial initial-condition blocks with safe expressions in `x` and `y`.
 - Initial-solution preview by cell, with selectable variable, palette, and
-  linear or logarithmic color scale.
+  linear or logarithmic color scale, automatic or manually specified limits,
+  clamping outside the selected range, and optional smooth coloring.
 - Initial numerical controls for MUSCL reconstruction, limiters, fluxes, and
   time integration.
 - New, open, and save case configuration.
@@ -23,8 +24,17 @@ Field expressions support arithmetic, comparisons, and common trigonometric,
 hyperbolic, exponential, logarithmic, and root functions. Blocks are applied in
 order, with later matching blocks taking precedence; cells outside all blocks
 use the configurable base state.
-The View menu and toolbar toggle the background grid; the Solution View panel
-controls the displayed field, color scale, palette, and mesh-edge visibility.
+The View menu and toolbar toggle the labeled background grid. Boundary
+Conditions and Initial Conditions are initially stacked on the left,
+Numerical Setup is on the right, and Solution View is available in its own
+top toolbar. The Solution View toolbar controls the displayed field,
+mesh-edge visibility, smooth coloring, and color scale.
+Palettes include Viridis, Plasma, Inferno, Coolwarm, Rainbow, Turbo, and
+Cividis. Automatic color limits are enabled by default; disable Automatic to
+enter manual minimum and maximum values. Logarithmic scales require positive
+field values and positive limits. Enable the color-bar icon to display a
+floating legend over the mesh; drag the legend itself to move it, use its
+bottom-right grip to resize it, and select horizontal or vertical orientation.
 
 The CFD solver is not implemented yet. The Run action is an explicit
 placeholder and does not start a simulation.
