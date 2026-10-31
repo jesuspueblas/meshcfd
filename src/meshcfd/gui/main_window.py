@@ -22,6 +22,7 @@ from PyQt5.QtWidgets import (
 from meshcfd.core.model import Case
 from meshcfd.gui.boundary_panel import BoundaryPanel
 from meshcfd.gui.canvas import MeshCanvas
+from meshcfd.gui.initial_conditions_panel import InitialConditionsPanel
 from meshcfd.gui.numerics_panel import NumericsPanel
 from meshcfd.io.mesh_io import MeshImportError, load_mesh
 from meshcfd.io.project_io import load_case, save_case
@@ -46,6 +47,15 @@ class MainWindow(QMainWindow):
         self.numerics_dock = self._add_dock(
             "Numerical Setup", Qt.RightDockWidgetArea, self.numerics_panel
         )
+        self.initial_conditions_panel = InitialConditionsPanel(self)
+        self.initial_conditions_dock = self._add_dock(
+            "Initial Conditions",
+            Qt.RightDockWidgetArea,
+            self.initial_conditions_panel,
+        )
+        self.boundary_panel.set_case(self.case)
+        self.numerics_panel.set_case(self.case)
+        self.initial_conditions_panel.set_case(self.case)
 
         self.status_label = QLabel("Ready")
         self.statusBar().addWidget(self.status_label)
@@ -55,6 +65,7 @@ class MainWindow(QMainWindow):
         self.boundary_panel.changed.connect(self._mark_dirty)
         self.boundary_panel.patch_selected.connect(self.canvas.select_patch)
         self.numerics_panel.changed.connect(self._mark_dirty)
+        self.initial_conditions_panel.changed.connect(self._mark_dirty)
 
         self._create_actions()
         self._create_menus()
@@ -115,6 +126,7 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.action_fit_mesh)
         view_menu.addAction(self.boundary_dock.toggleViewAction())
         view_menu.addAction(self.numerics_dock.toggleViewAction())
+        view_menu.addAction(self.initial_conditions_dock.toggleViewAction())
 
     def _create_toolbar(self) -> None:
         toolbar = QToolBar("Case", self)
@@ -162,6 +174,7 @@ class MainWindow(QMainWindow):
         self.canvas.set_mesh(case.mesh)
         self.boundary_panel.set_case(case)
         self.numerics_panel.set_case(case)
+        self.initial_conditions_panel.set_case(case)
         self._update_mesh_info()
         self._update_title()
 

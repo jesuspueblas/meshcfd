@@ -9,12 +9,18 @@ The current version provides:
 - Import and visualization of finite-volume mesh JSON files exported by
   MeshCAD.
 - Per-patch boundary-condition setup.
+- Spatial initial-condition blocks with safe expressions in `x` and `y`.
 - Initial numerical controls for MUSCL reconstruction, limiters, fluxes, and
   time integration.
 - New, open, and save case configuration.
 
 Cases reference imported mesh files using a path relative to the case file.
 Keep the mesh file alongside the case when moving or sharing it.
+Initial-condition domains are boolean predicates such as `x^2 + y^2 <= 1`.
+Field expressions support arithmetic, comparisons, and common trigonometric,
+hyperbolic, exponential, logarithmic, and root functions. Blocks are applied in
+order, with later matching blocks taking precedence; cells outside all blocks
+use the configurable base state.
 
 The CFD solver is not implemented yet. The Run action is an explicit
 placeholder and does not start a simulation.

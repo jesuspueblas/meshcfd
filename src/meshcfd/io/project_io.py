@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from meshcfd.core.expressions import ExpressionError, compile_expression
 from meshcfd.core.model import (
     BOUNDARY_TYPES,
     FLUX_SCHEMES,
@@ -16,12 +17,15 @@ from meshcfd.core.model import (
     TIME_INTEGRATION_SCHEMES,
     BoundaryCondition,
     Case,
+    InitialConditionBlock,
+    InitialConditionSettings,
+    InitialState,
     NumericalSettings,
 )
 from meshcfd.io.mesh_io import load_mesh, mesh_from_dict, mesh_to_dict
 
 PROJECT_FORMAT = "meshcfd-case"
-PROJECT_VERSION = 2
+PROJECT_VERSION = 3
 
 
 def case_to_dict(
@@ -43,6 +47,7 @@ def case_to_dict(
                 "The mesh file and case file must be on the same drive "
                 "to save a relative mesh reference."
             ) from error
+    initial_conditions = _initial_conditions_to_dict(case.initial_conditions)
     return {
         "format": PROJECT_FORMAT,
         "version": PROJECT_VERSION,
@@ -68,6 +73,7 @@ def case_to_dict(
             "gamma": case.numerics.gamma,
             "gas_constant": case.numerics.gas_constant,
         },
+        "initial_conditions": initial_conditions,
     }
 
 
@@ -75,9 +81,9 @@ def case_from_dict(
     data: dict[str, Any], case_path: str | Path | None = None
 ) -> Case:
     version = data.get("version")
-    if data.get("format") != PROJECT_FORMAT or version not in (1, PROJECT_VERSION):
+    if data.get("format") != PROJECT_FORMAT or version not in (1, 2, PROJECT_VERSION):
         raise ValueError(
-            f"Unsupported case format. Expected MeshCFD case version 1 or "
+            f"Unsupported case format. Expected MeshCFD case version 1, 2 or "
             f"{PROJECT_VERSION}."
         )
     name = data.get("name")
@@ -90,7 +96,7 @@ def case_from_dict(
     if mesh_data is not None:
         if isinstance(mesh_data, dict):
             mesh = mesh_from_dict(mesh_data)
-        elif version == PROJECT_VERSION:
+        elif version >= 2:
             if not isinstance(mesh_data, str) or not mesh_data.strip():
                 raise ValueError("Case mesh reference must be a non-empty path or null.")
             reference = Path(mesh_data)
@@ -136,7 +142,7 @@ def case_from_dict(
                 raise ValueError(f"Boundary value '{key}' must be numeric.")
             try:
                 number = float(value)
-            except (TypeError, ValueError) as error:
+            except (OverflowError, TypeError, ValueError) as error:
                 raise ValueError(f"Boundary value '{key}' must be numeric.") from error
             if not math.isfinite(number):
                 raise ValueError(f"Boundary value '{key}' must be finite.")
@@ -186,6 +192,10 @@ def case_from_dict(
     if settings.gamma <= 1.0:
         raise ValueError("Gamma must be greater than 1.")
 
+    initial_conditions = _initial_conditions_from_dict(
+        data.get("initial_conditions", {})
+    )
+
     if mesh is not None:
         valid_patches = {patch.id: patch.name for patch in mesh.patches}
         if any(
@@ -200,7 +210,116 @@ def case_from_dict(
             for patch in mesh.patches
             if patch.id not in configured_ids
         )
-    return Case(name, mesh, conditions, settings, mesh_path)
+    return Case(
+        name=name,
+        mesh=mesh,
+        boundary_conditions=conditions,
+        numerics=settings,
+        mesh_path=mesh_path,
+        initial_conditions=initial_conditions,
+    )
+
+
+def _initial_conditions_from_dict(data: Any) -> InitialConditionSettings:
+    if not isinstance(data, dict):
+        raise ValueError("Initial conditions must be an object.")
+    raw_base = data.get("base_state", {})
+    if not isinstance(raw_base, dict):
+        raise ValueError("Initial-condition base state must be an object.")
+    defaults = InitialState()
+    base_state = InitialState(
+        density=_positive_float(raw_base.get("density", defaults.density), "Density"),
+        velocity_x=_finite_float(
+            raw_base.get("velocity_x", defaults.velocity_x), "Velocity X"
+        ),
+        velocity_y=_finite_float(
+            raw_base.get("velocity_y", defaults.velocity_y), "Velocity Y"
+        ),
+        pressure=_positive_float(
+            raw_base.get("pressure", defaults.pressure), "Pressure"
+        ),
+    )
+    raw_blocks = data.get("blocks", [])
+    if not isinstance(raw_blocks, list):
+        raise ValueError("Initial-condition blocks must be a list.")
+    blocks = []
+    for index, raw_block in enumerate(raw_blocks):
+        if not isinstance(raw_block, dict):
+            raise ValueError("Each initial-condition block must be an object.")
+        name = raw_block.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"Initial-condition block {index + 1} needs a name.")
+        expressions = {
+            key: raw_block.get(key)
+            for key in ("domain", "density", "velocity_x", "velocity_y", "pressure")
+        }
+        if not all(isinstance(value, str) for value in expressions.values()):
+            raise ValueError(
+                f"Initial-condition block '{name}' has an invalid expression."
+            )
+        try:
+            compile_expression(expressions["domain"], boolean=True)
+            for key in ("density", "velocity_x", "velocity_y", "pressure"):
+                compile_expression(expressions[key])
+        except ExpressionError as error:
+            raise ValueError(
+                f"Invalid expression in initial-condition block '{name}': {error}"
+            ) from error
+        blocks.append(InitialConditionBlock(name=name, **expressions))
+    return InitialConditionSettings(base_state=base_state, blocks=blocks)
+
+
+def _initial_conditions_to_dict(
+    settings: InitialConditionSettings,
+) -> dict[str, Any]:
+    state = settings.base_state
+    _positive_float(state.density, "Density")
+    _finite_float(state.velocity_x, "Velocity X")
+    _finite_float(state.velocity_y, "Velocity Y")
+    _positive_float(state.pressure, "Pressure")
+    blocks = []
+    for block in settings.blocks:
+        if not isinstance(block.name, str) or not block.name.strip():
+            raise ValueError("Initial-condition block name must not be empty.")
+        try:
+            compile_expression(block.domain, boolean=True)
+            for key in ("density", "velocity_x", "velocity_y", "pressure"):
+                compile_expression(getattr(block, key))
+        except ExpressionError as error:
+            raise ValueError(
+                f"Invalid expression in initial-condition block '{block.name}': {error}"
+            ) from error
+        blocks.append(
+            {
+                "name": block.name,
+                "domain": block.domain,
+                "density": block.density,
+                "velocity_x": block.velocity_x,
+                "velocity_y": block.velocity_y,
+                "pressure": block.pressure,
+            }
+        )
+    return {
+        "base_state": {
+            "density": state.density,
+            "velocity_x": state.velocity_x,
+            "velocity_y": state.velocity_y,
+            "pressure": state.pressure,
+        },
+        "blocks": blocks,
+    }
+
+
+def _finite_float(value: Any, description: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{description} must be numeric.")
+    try:
+        number = float(value)
+    except (OverflowError, TypeError, ValueError) as error:
+        raise ValueError(f"{description} must be numeric.") from error
+    if not math.isfinite(number):
+        raise ValueError(f"{description} must be finite.")
+    return number
 
 
 def _positive_float(value: Any, description: str) -> float:
@@ -208,7 +327,7 @@ def _positive_float(value: Any, description: str) -> float:
         raise ValueError(f"{description} must be a positive number.")
     try:
         number = float(value)
-    except (TypeError, ValueError) as error:
+    except (OverflowError, TypeError, ValueError) as error:
         raise ValueError(f"{description} must be a positive number.") from error
     if not math.isfinite(number) or number <= 0.0:
         raise ValueError(f"{description} must be a positive finite number.")

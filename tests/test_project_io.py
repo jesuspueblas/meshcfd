@@ -1,6 +1,8 @@
 import json
 
-from meshcfd.core.model import Case
+import pytest
+
+from meshcfd.core.model import Case, InitialConditionBlock
 from meshcfd.io.mesh_io import mesh_from_dict, mesh_to_dict
 from meshcfd.io.project_io import case_from_dict, case_to_dict, load_case, save_case
 
@@ -66,12 +68,47 @@ def test_case_saves_relative_mesh_reference_and_reloads_mesh(tmp_path):
     save_case(case_path, case)
 
     saved_data = json.loads(case_path.read_text(encoding="utf-8"))
-    assert saved_data["version"] == 2
+    assert saved_data["version"] == 3
     assert saved_data["mesh"] == "../mesh.json"
     assert isinstance(saved_data["mesh"], str)
 
     restored = load_case(case_path)
     assert restored.mesh == case.mesh
+    assert restored.mesh_path == mesh_path.resolve()
+
+
+def test_case_round_trip_preserves_initial_condition_blocks(tmp_path):
+    case = Case(name="channel")
+    case.initial_conditions.base_state.density = 0.95
+    case.initial_conditions.blocks = [
+        InitialConditionBlock(
+            name="hot core",
+            domain="x*x + y*y <= 1",
+            density="1 + 0.1*cos(x)",
+            velocity_x="10*tanh(y)",
+            velocity_y="0",
+            pressure="101325 + 1000*sin(x)",
+        )
+    ]
+    path = tmp_path / "channel.mcf.json"
+
+    save_case(path, case)
+    restored = load_case(path)
+
+    assert restored.initial_conditions == case.initial_conditions
+
+
+def test_version_two_cases_with_relative_mesh_reference_are_supported(tmp_path):
+    mesh_path = tmp_path / "mesh.json"
+    mesh_path.write_text(json.dumps(mesh_to_dict(make_mesh())), encoding="utf-8")
+    case_path = tmp_path / "saved.mcf.json"
+    data = case_to_dict(Case(name="legacy"))
+    data.update(version=2, mesh="mesh.json")
+    case_path.write_text(json.dumps(data), encoding="utf-8")
+
+    restored = load_case(case_path)
+
+    assert restored.mesh == make_mesh()
     assert restored.mesh_path == mesh_path.resolve()
 
 
@@ -85,6 +122,16 @@ def test_case_loads_version_one_embedded_mesh():
 
     assert restored.mesh == case.mesh
     assert restored.mesh_path is None
+
+
+def test_case_save_rejects_invalid_initial_condition_expression():
+    case = Case()
+    case.initial_conditions.blocks.append(
+        InitialConditionBlock(domain="__import__('os').system('whoami')")
+    )
+
+    with pytest.raises(ValueError, match="Unsupported expression syntax"):
+        case_to_dict(case)
 
 
 def test_case_load_fills_default_conditions_for_unconfigured_patches():

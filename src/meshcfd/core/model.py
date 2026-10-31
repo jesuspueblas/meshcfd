@@ -62,12 +62,39 @@ class NumericalSettings:
 
 
 @dataclass
+class InitialState:
+    density: float = 1.225
+    velocity_x: float = 0.0
+    velocity_y: float = 0.0
+    pressure: float = 101325.0
+
+
+@dataclass
+class InitialConditionBlock:
+    name: str = "Block 1"
+    domain: str = "True"
+    density: str = "1.225"
+    velocity_x: str = "0"
+    velocity_y: str = "0"
+    pressure: str = "101325"
+
+
+@dataclass
+class InitialConditionSettings:
+    base_state: InitialState = field(default_factory=InitialState)
+    blocks: list[InitialConditionBlock] = field(default_factory=list)
+
+
+@dataclass
 class Case:
     name: str = "Untitled"
     mesh: FiniteVolumeMesh | None = None
     boundary_conditions: list[BoundaryCondition] = field(default_factory=list)
     numerics: NumericalSettings = field(default_factory=NumericalSettings)
     mesh_path: Path | None = None
+    initial_conditions: InitialConditionSettings = field(
+        default_factory=InitialConditionSettings
+    )
 
     def __post_init__(self) -> None:
         if self.mesh is not None and not self.boundary_conditions:
