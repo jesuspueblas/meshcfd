@@ -75,8 +75,10 @@ def solve_case(
     progress_callback: Callable[[SolverProgress], None] | None = None,
     cancel_callback: Callable[[], bool] | None = None,
     live_solution_updates: bool = False,
+    start_time: float = 0.0,
+    step_offset: int = 0,
 ) -> SolverResult:
-    """Advance a case to its configured end time or iteration limit."""
+    """Advance a case from its current time to its end time or iteration limit."""
     if case.mesh is None:
         raise SolverError("Import a mesh before running the solver.")
     settings = case.numerics
@@ -114,6 +116,18 @@ def solve_case(
         raise SolverError("Maximum iterations must be a positive integer.")
     if not math.isfinite(settings.end_time) or settings.end_time <= 0.0:
         raise SolverError("End time must be positive and finite.")
+    if not math.isfinite(start_time) or start_time < 0.0:
+        raise SolverError("Current solution time must be finite and non-negative.")
+    if start_time >= settings.end_time:
+        raise SolverError(
+            "End time must be greater than the current solution time to continue."
+        )
+    if (
+        isinstance(step_offset, bool)
+        or not isinstance(step_offset, int)
+        or step_offset < 0
+    ):
+        raise SolverError("Current solution step must be a non-negative integer.")
     if not math.isfinite(settings.gamma) or settings.gamma <= 1.0:
         raise SolverError("Specific heat ratio must be finite and greater than 1.")
 
@@ -139,11 +153,12 @@ def solve_case(
     except ValueError as error:
         raise SolverError(f"Invalid initial state: {error}") from error
 
-    time = 0.0
+    time = start_time
     residual = 0.0
     completed = False
-    steps = 0
-    for step in range(1, settings.max_iterations + 1):
+    steps = step_offset
+    for local_step in range(1, settings.max_iterations + 1):
+        step = step_offset + local_step
         if cancel_callback is not None and cancel_callback():
             break
         try:
@@ -191,10 +206,10 @@ def solve_case(
         if progress_callback is not None:
             progress_states = None
             if live_solution_updates and (
-                step == 1
+                local_step == 1
                 or step % 10 == 0
                 or time >= settings.end_time * (1.0 - 1e-13)
-                or step == settings.max_iterations
+                or local_step == settings.max_iterations
             ):
                 progress_primitive = conservative_to_primitive(
                     conservative, settings.gamma

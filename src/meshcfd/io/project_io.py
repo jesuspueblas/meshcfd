@@ -28,7 +28,7 @@ from meshcfd.core.periodic import detect_periodic_pair
 from meshcfd.io.mesh_io import load_mesh, mesh_from_dict, mesh_to_dict
 
 PROJECT_FORMAT = "meshcfd-case"
-PROJECT_VERSION = 5
+PROJECT_VERSION = 6
 
 
 def case_to_dict(
@@ -55,6 +55,17 @@ def case_to_dict(
                 "to save a relative mesh reference."
             ) from error
     initial_conditions = _initial_conditions_to_dict(case.initial_conditions)
+    final_solution = _final_solution_to_dict(case.final_solution, case.mesh)
+    if case.final_solution is None:
+        if case.solution_time != 0.0 or case.solution_steps != 0:
+            raise ValueError("Solution time and steps require a final solution.")
+        solution_time = 0.0
+        solution_steps = 0
+    else:
+        solution_time = _finite_non_negative_float(
+            case.solution_time, "Solution time"
+        )
+        solution_steps = _non_negative_integer(case.solution_steps, "Solution steps")
     return {
         "format": PROJECT_FORMAT,
         "version": PROJECT_VERSION,
@@ -91,6 +102,9 @@ def case_to_dict(
             "gas_constant": case.numerics.gas_constant,
         },
         "initial_conditions": initial_conditions,
+        "final_solution": final_solution,
+        "solution_time": solution_time,
+        "solution_steps": solution_steps,
     }
 
 
@@ -103,6 +117,7 @@ def case_from_dict(
         2,
         3,
         4,
+        5,
         PROJECT_VERSION,
     ):
         raise ValueError(
@@ -221,6 +236,15 @@ def case_from_dict(
     initial_conditions = _initial_conditions_from_dict(
         data.get("initial_conditions", {})
     )
+    final_solution = _final_solution_from_dict(data.get("final_solution"), mesh)
+    solution_time = _finite_non_negative_float(
+        data.get("solution_time", 0.0), "Solution time"
+    )
+    solution_steps = _non_negative_integer(
+        data.get("solution_steps", 0), "Solution steps"
+    )
+    if final_solution is None and (solution_time != 0.0 or solution_steps != 0):
+        raise ValueError("Solution time and steps require a final solution.")
 
     if mesh is not None:
         valid_patches = {patch.id: patch.name for patch in mesh.patches}
@@ -248,7 +272,75 @@ def case_from_dict(
         mesh_path=mesh_path,
         initial_conditions=initial_conditions,
         periodic_pairs=periodic_pairs,
+        final_solution=final_solution,
+        solution_time=solution_time,
+        solution_steps=solution_steps,
     )
+
+
+def _final_solution_to_dict(
+    states: tuple[InitialState, ...] | None,
+    mesh: FiniteVolumeMesh | None,
+) -> list[dict[str, float]] | None:
+    if states is None:
+        return None
+    if mesh is None:
+        raise ValueError("A final solution requires a mesh.")
+    if len(states) != len(mesh.cells):
+        raise ValueError("Final solution state count must match the mesh cell count.")
+    result = []
+    for state in states:
+        density = _positive_float(state.density, "Final solution density")
+        pressure = _positive_float(state.pressure, "Final solution pressure")
+        velocity_x = _finite_float(state.velocity_x, "Final solution velocity X")
+        velocity_y = _finite_float(state.velocity_y, "Final solution velocity Y")
+        result.append(
+            {
+                "density": density,
+                "velocity_x": velocity_x,
+                "velocity_y": velocity_y,
+                "pressure": pressure,
+            }
+        )
+    return result
+
+
+def _final_solution_from_dict(
+    raw_states: Any, mesh: FiniteVolumeMesh | None
+) -> tuple[InitialState, ...] | None:
+    if raw_states is None:
+        return None
+    if mesh is None:
+        raise ValueError("A final solution requires a mesh.")
+    if not isinstance(raw_states, list):
+        raise ValueError("Final solution must be a list of cell states or null.")
+    if len(raw_states) != len(mesh.cells):
+        raise ValueError("Final solution state count must match the mesh cell count.")
+
+    states = []
+    for index, raw_state in enumerate(raw_states):
+        if not isinstance(raw_state, dict):
+            raise ValueError(f"Final solution state {index} must be an object.")
+        states.append(
+            InitialState(
+                density=_positive_float(
+                    raw_state.get("density"), f"Final solution density at cell {index}"
+                ),
+                velocity_x=_finite_float(
+                    raw_state.get("velocity_x"),
+                    f"Final solution velocity X at cell {index}",
+                ),
+                velocity_y=_finite_float(
+                    raw_state.get("velocity_y"),
+                    f"Final solution velocity Y at cell {index}",
+                ),
+                pressure=_positive_float(
+                    raw_state.get("pressure"),
+                    f"Final solution pressure at cell {index}",
+                ),
+            )
+        )
+    return tuple(states)
 
 
 def _periodic_pairs_from_dict(
@@ -416,6 +508,19 @@ def _finite_float(value: Any, description: str) -> float:
     if not math.isfinite(number):
         raise ValueError(f"{description} must be finite.")
     return number
+
+
+def _finite_non_negative_float(value: Any, description: str) -> float:
+    number = _finite_float(value, description)
+    if number < 0.0:
+        raise ValueError(f"{description} must be non-negative.")
+    return number
+
+
+def _non_negative_integer(value: Any, description: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{description} must be a non-negative integer.")
+    return value
 
 
 def _positive_float(value: Any, description: str) -> float:

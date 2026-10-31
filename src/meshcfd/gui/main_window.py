@@ -57,6 +57,8 @@ class _SolverWorker(QThread):
                 self._report_progress,
                 self.isInterruptionRequested,
                 self.live_solution_updates,
+                self.case.solution_time,
+                self.case.solution_steps,
             )
         except Exception as error:
             self.error = str(error)
@@ -145,7 +147,6 @@ class MainWindow(QMainWindow):
         self.boundary_panel.changed.connect(self._clear_simulation_solution)
         self.boundary_panel.patch_selected.connect(self.canvas.select_patch)
         self.numerics_panel.changed.connect(self._mark_dirty)
-        self.numerics_panel.changed.connect(self._clear_simulation_solution)
         self.numerics_panel.live_solution_changed.connect(
             self._set_live_solution_updates
         )
@@ -331,7 +332,7 @@ class MainWindow(QMainWindow):
         self.numerics_panel.set_case(case)
         self.initial_conditions_panel.set_case(case)
         self._update_mesh_info()
-        self._refresh_solution()
+        self._refresh_solution(preserve_saved_solution=True)
         self._update_title()
         self._log_output(f"Loaded case settings: {case.name}.")
 
@@ -340,8 +341,14 @@ class MainWindow(QMainWindow):
         self.canvas.viewport().update()
         self._update_visualization()
 
-    def _refresh_solution(self) -> None:
-        self._simulation_solution = None
+    def _refresh_solution(self, preserve_saved_solution: bool = False) -> None:
+        self._simulation_solution = (
+            self.case.final_solution if preserve_saved_solution else None
+        )
+        if not preserve_saved_solution:
+            self.case.final_solution = None
+            self.case.solution_time = 0.0
+            self.case.solution_steps = 0
         if self.case.mesh is None:
             self._initial_solution = None
             self.canvas.set_solution(None)
@@ -370,6 +377,9 @@ class MainWindow(QMainWindow):
 
     def _clear_simulation_solution(self) -> None:
         self._simulation_solution = None
+        self.case.final_solution = None
+        self.case.solution_time = 0.0
+        self.case.solution_steps = 0
         self._update_visualization()
 
     def _update_visualization(self, *_) -> None:
@@ -548,7 +558,9 @@ class MainWindow(QMainWindow):
         if self._solver_worker is not None:
             return
         snapshot = copy.deepcopy(self.case)
-        initial_states = copy.deepcopy(self._initial_solution)
+        initial_states = copy.deepcopy(
+            self._simulation_solution or self._initial_solution
+        )
         self._run_revision = self._case_revision
         worker = _SolverWorker(
             snapshot, initial_states, self._live_solution_updates
@@ -563,6 +575,8 @@ class MainWindow(QMainWindow):
             f"Starting {snapshot.numerics.flux} solver with "
             f"{snapshot.numerics.time_integration}, "
             f"{snapshot.numerics.reconstruction}, "
+            f"starting at t={snapshot.solution_time:g} "
+            f"(step {snapshot.solution_steps}), "
             f"CFL={snapshot.numerics.cfl:g}, "
             f"end time={snapshot.numerics.end_time:g}, "
             f"maximum steps={snapshot.numerics.max_iterations}."
@@ -621,7 +635,11 @@ class MainWindow(QMainWindow):
             )
             return
         self._simulation_solution = result.states
+        self.case.final_solution = result.states
+        self.case.solution_time = result.time
+        self.case.solution_steps = result.steps
         self._update_visualization()
+        self._mark_dirty()
         if result.completed:
             message = (
                 f"Completed at t = {result.time:.6g} in {result.steps} steps "

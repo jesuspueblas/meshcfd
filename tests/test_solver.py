@@ -219,6 +219,38 @@ def test_solver_reports_iteration_limit_and_rejects_unsupported_choices():
         solve_case(case, (InitialState(),))
 
 
+def test_solver_continues_from_previous_time_and_step_count():
+    case = make_periodic_case()
+    case.numerics.end_time = 10.0
+    case.numerics.max_iterations = 1
+    initial = (InitialState(1.0, 0.1, 0.0, 1.0),)
+
+    first = solve_case(case, initial)
+    progress = []
+    second = solve_case(
+        case,
+        first.states,
+        progress.append,
+        start_time=first.time,
+        step_offset=first.steps,
+    )
+
+    assert not first.completed
+    assert not second.completed
+    assert second.time > first.time
+    assert second.steps == first.steps + 1
+    assert progress[0].step == second.steps
+    assert progress[0].time > first.time
+
+
+def test_solver_rejects_end_time_not_after_current_time():
+    case = make_periodic_case()
+    case.numerics.end_time = 0.1
+
+    with pytest.raises(SolverError, match="greater than the current solution time"):
+        solve_case(case, (InitialState(),), start_time=0.1)
+
+
 def test_solver_reports_residual_history_and_optional_live_states():
     case = make_periodic_case()
     case.numerics.end_time = 0.1

@@ -24,6 +24,10 @@ The current version provides:
 - Initial numerical controls for MUSCL reconstruction, limiters, fluxes, and
   time integration.
 - New, open, and save case configuration.
+- Persistence of the final cell-centered solution in the case file, so a saved
+  run can be reopened and visualized without running the solver again.
+- Repeated runs continue from the current solution and accumulated simulation
+  time. Increase the configured end time to continue after reaching it.
 
 Cases reference imported mesh files using a path relative to the case file.
 Keep the mesh file alongside the case when moving or sharing it.

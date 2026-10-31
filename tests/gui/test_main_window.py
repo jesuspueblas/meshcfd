@@ -6,6 +6,7 @@ from PyQt5.QtWidgets import QMessageBox
 from meshcfd.core.model import Case
 from meshcfd.gui.main_window import MainWindow
 from meshcfd.io.mesh_io import mesh_from_dict, mesh_to_dict
+from meshcfd.io.project_io import load_case, save_case
 
 
 def make_mesh():
@@ -170,7 +171,7 @@ def test_import_mesh_action_loads_patches_and_displays_mesh(
     assert window.mesh_info_label.text() == "1 cells | 4 faces | 4 patches"
 
 
-def test_run_action_runs_solver_and_displays_solution(qtbot):
+def test_run_action_runs_solver_and_displays_solution(qtbot, tmp_path):
     window = MainWindow()
     qtbot.addWidget(window)
     case = Case()
@@ -190,6 +191,54 @@ def test_run_action_runs_solver_and_displays_solution(qtbot):
     assert "ITER" in output
     assert "Completed at t" in output
     assert not window.output_dock.isHidden()
+    assert window.case.final_solution == window.canvas.solution
+
+    case_path = tmp_path / "solved.mcf.json"
+    save_case(case_path, window.case)
+    restored = load_case(case_path)
+    assert restored.final_solution == window.case.final_solution
+    assert restored.solution_time == window.case.solution_time
+    assert restored.solution_steps == window.case.solution_steps
+
+    window._set_case(restored, case_path)
+    assert window.canvas.solution == restored.final_solution
+
+
+def test_running_again_continues_from_current_solution(qtbot, tmp_path):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    case = Case()
+    case.set_mesh(make_mesh())
+    case.numerics.end_time = 10.0
+    case.numerics.max_iterations = 1
+    window._set_case(case, None)
+
+    window._on_run()
+    qtbot.waitUntil(lambda: window._solver_worker is None, timeout=5000)
+    first_solution = window.case.final_solution
+    first_time = window.case.solution_time
+    assert first_solution is not None
+    assert window.case.solution_steps == 1
+
+    case_path = tmp_path / "restart.mcf.json"
+    save_case(case_path, window.case)
+    restored = load_case(case_path)
+    window._set_case(restored, case_path)
+    assert window.canvas.solution == first_solution
+    window.numerics_panel.end_time_spin.setValue(20.0)
+    assert window.canvas.solution == first_solution
+    assert window.case.solution_time == first_time
+
+    window._on_run()
+    worker = window._solver_worker
+    assert worker is not None
+    assert worker.initial_states == restored.final_solution
+    assert worker.case.solution_time == first_time
+    assert worker.case.solution_steps == 1
+    qtbot.waitUntil(lambda: window._solver_worker is None, timeout=5000)
+
+    assert window.case.solution_time > first_time
+    assert window.case.solution_steps == 2
 
 
 def test_live_solution_toggle_is_logged_and_used_for_new_runs(qtbot):

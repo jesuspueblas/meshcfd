@@ -106,6 +106,9 @@ class Case:
         default_factory=InitialConditionSettings
     )
     periodic_pairs: list[PeriodicBoundaryPair] = field(default_factory=list)
+    final_solution: tuple[InitialState, ...] | None = None
+    solution_time: float = 0.0
+    solution_steps: int = 0
 
     def __post_init__(self) -> None:
         if self.mesh is not None and not self.boundary_conditions:
@@ -123,6 +126,9 @@ class Case:
         }
         self.mesh = mesh
         self.mesh_path = Path(mesh_path).resolve() if mesh_path is not None else None
+        self.final_solution = None
+        self.solution_time = 0.0
+        self.solution_steps = 0
         self.boundary_conditions = [
             BoundaryCondition(
                 patch_id=patch.id,

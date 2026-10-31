@@ -52,7 +52,10 @@ gui (PyQt5)         io (JSON)
 - `meshcfd.gui.main_window` coordinates case actions, panels, and runs the
   solver on a background thread, displaying completed cell-centered fields
   and streaming iteration/residual logs to a bottom Output dock. Optional
-  live field updates are throttled to every ten steps.
+  live field updates are throttled to every ten steps. The latest solver
+  result and cumulative time-step count are stored in the case file and
+  restored when reopening a solved case. Subsequent runs resume from that
+  field and time; the configured end time remains an absolute target.
 
 The solver handles transient inviscid ideal-gas Euler flow. Pressure inlet,
 pressure outlet, velocity inlet, far-field, and MUSCL-parabolic options are

@@ -6,6 +6,7 @@ from meshcfd.core.model import (
     Case,
     FiniteVolumeMesh,
     InitialConditionBlock,
+    InitialState,
     MeshPatch,
     NumericalSettings,
     PeriodicBoundaryPair,
@@ -78,7 +79,7 @@ def test_case_saves_relative_mesh_reference_and_reloads_mesh(tmp_path):
     save_case(case_path, case)
 
     saved_data = json.loads(case_path.read_text(encoding="utf-8"))
-    assert saved_data["version"] == 5
+    assert saved_data["version"] == 6
     assert saved_data["mesh"] == "../mesh.json"
     assert isinstance(saved_data["mesh"], str)
 
@@ -106,6 +107,52 @@ def test_case_round_trip_preserves_initial_condition_blocks(tmp_path):
     restored = load_case(path)
 
     assert restored.initial_conditions == case.initial_conditions
+
+
+def test_case_round_trip_preserves_final_solution(tmp_path):
+    case = Case(name="solved", mesh=make_mesh())
+    case.final_solution = (InitialState(0.9, 12.0, -3.0, 98000.0),)
+    case.solution_time = 0.25
+    case.solution_steps = 17
+    path = tmp_path / "solved.mcf.json"
+
+    save_case(path, case)
+    saved_data = json.loads(path.read_text(encoding="utf-8"))
+    restored = load_case(path)
+
+    assert saved_data["version"] == 6
+    assert saved_data["final_solution"] == [
+        {
+            "density": 0.9,
+            "velocity_x": 12.0,
+            "velocity_y": -3.0,
+            "pressure": 98000.0,
+        }
+    ]
+    assert restored.final_solution == case.final_solution
+    assert restored.solution_time == case.solution_time
+    assert restored.solution_steps == case.solution_steps
+    assert case_to_dict(restored) == case_to_dict(case)
+
+
+def test_legacy_case_without_final_solution_loads_without_one():
+    data = case_to_dict(Case(name="legacy"))
+    data["version"] = 5
+    data.pop("final_solution")
+
+    restored = case_from_dict(data)
+
+    assert restored.final_solution is None
+    assert restored.solution_time == 0.0
+    assert restored.solution_steps == 0
+
+
+def test_case_load_rejects_final_solution_with_wrong_cell_count():
+    data = case_to_dict(Case(name="solved", mesh=make_mesh()))
+    data["final_solution"] = []
+
+    with pytest.raises(ValueError, match="state count"):
+        case_from_dict(data)
 
 
 def test_version_two_cases_with_relative_mesh_reference_are_supported(tmp_path):
@@ -151,7 +198,7 @@ def test_periodic_pair_detection_and_case_round_trip(tmp_path):
     assert restored.periodic_pairs == case.periodic_pairs
     assert restored.boundary_conditions[1].kind == "Periodic"
     assert restored.boundary_conditions[3].kind == "Periodic"
-    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 5
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 6
 
 
 def test_version_four_periodic_case_defaults_end_time():

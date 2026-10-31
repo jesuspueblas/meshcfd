@@ -48,6 +48,10 @@ class NumericsPanel(QWidget):
         self.iterations_spin = QSpinBox(self)
         self.iterations_spin.setRange(1, 10000000)
         self.end_time_spin = self._double_spin(1e-12, 1e12, 1.0, 8)
+        self.end_time_spin.setToolTip(
+            "Absolute simulation end time. Increase it to continue a run that "
+            "has already reached its current end time."
+        )
         self.residual_spin = self._double_spin(1e-14, 1.0, 1e-6, 12)
         self.residual_spin.setToolTip(
             "Residual is reported for monitoring; transient runs stop at End time "
