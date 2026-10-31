@@ -58,6 +58,6 @@ gui (PyQt5)         io (JSON)
   field and time; the configured end time remains an absolute target.
 
 The solver handles transient inviscid ideal-gas Euler flow with periodic,
-slip-wall, symmetry, velocity-inlet, and pressure-outlet boundaries. Pressure
-inlet, far-field, and MUSCL-parabolic options are not yet supported by the
-solver and produce explicit errors if selected.
+slip-wall, symmetry, velocity-inlet, pressure-outlet, and characteristic
+far-field boundaries. Pressure-inlet and MUSCL-parabolic options are not yet
+supported by the solver and produce explicit errors if selected.

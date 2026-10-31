@@ -91,6 +91,24 @@ def test_boundary_and_numerical_controls_update_case(qtbot):
     assert window.canvas.selected_patch_id == 2
 
 
+def test_far_field_boundary_uses_density_velocity_and_pressure_controls(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    case = Case()
+    case.set_mesh(make_mesh())
+    window._set_case(case, None)
+
+    window.boundary_panel.patch_list.setCurrentRow(1)
+    window.boundary_panel.kind_combo.setCurrentText("Far Field")
+
+    assert set(window.boundary_panel.value_controls) == {
+        "density",
+        "velocity_x",
+        "velocity_y",
+        "pressure",
+    }
+
+
 def test_boundary_panel_creates_detected_periodic_pair(qtbot):
     window = MainWindow()
     qtbot.addWidget(window)

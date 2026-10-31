@@ -15,7 +15,12 @@ from meshcfd.core.model import (
     MeshPatch,
     PeriodicBoundaryPair,
 )
-from meshcfd.core.solver import SolverError, SolverProgress, solve_case
+from meshcfd.core.solver import (
+    SolverError,
+    SolverProgress,
+    _far_field_boundary_states,
+    solve_case,
+)
 
 
 def make_periodic_mesh(nx=1, ny=1, length_x=1.0, length_y=1.0):
@@ -278,6 +283,74 @@ def test_velocity_inlet_rejects_non_positive_density():
     }
 
     with pytest.raises(SolverError, match="Density.*must be positive"):
+        solve_case(case, (InitialState(),))
+
+
+@pytest.mark.parametrize("flux", ("Rusanov", "HLLC", "Roe"))
+def test_far_field_preserves_matching_uniform_flow(flux):
+    case = make_periodic_case()
+    case.periodic_pairs.clear()
+    case.numerics.flux = flux
+    case.numerics.end_time = 0.01
+    for condition in case.boundary_conditions:
+        condition.kind = "Far Field"
+        condition.values = {
+            "density": 1.0,
+            "velocity_x": 0.2,
+            "velocity_y": -0.1,
+            "pressure": 1.0,
+        }
+
+    result = solve_case(case, (InitialState(1.0, 0.2, -0.1, 1.0),))
+
+    assert result.completed
+    np.testing.assert_allclose(
+        [
+            result.states[0].density,
+            result.states[0].velocity_x,
+            result.states[0].velocity_y,
+            result.states[0].pressure,
+        ],
+        (1.0, 0.2, -0.1, 1.0),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+
+
+def test_far_field_characteristics_select_incoming_and_outgoing_information():
+    interior = np.array(
+        ((1.0, 3.0, 0.0, 1.0), (1.0, 0.2, 0.0, 1.0), (1.0, -3.0, 0.0, 1.0))
+    )
+    far_field = np.array(
+        ((2.0, 0.0, 0.0, 2.0), (2.0, 0.4, 0.0, 2.0), (2.0, 0.0, 0.0, 2.0))
+    )
+    normals = np.array(((1.0, 0.0), (1.0, 0.0), (1.0, 0.0)))
+
+    exterior = _far_field_boundary_states(interior, far_field, normals, 1.4)
+
+    np.testing.assert_allclose(exterior[0], interior[0])
+    np.testing.assert_allclose(exterior[2], far_field[2])
+    assert exterior[1, 1] == pytest.approx(0.3)
+    assert exterior[1, 2] == pytest.approx(interior[1, 2])
+    assert exterior[1, 3] / exterior[1, 0] ** 1.4 == pytest.approx(
+        interior[1, 3] / interior[1, 0] ** 1.4
+    )
+
+
+def test_far_field_rejects_non_positive_pressure():
+    case = make_periodic_case()
+    case.periodic_pairs.clear()
+    for condition in case.boundary_conditions:
+        condition.kind = "Wall"
+    case.boundary_conditions[1].kind = "Far Field"
+    case.boundary_conditions[1].values = {
+        "density": 1.0,
+        "velocity_x": 1.0,
+        "velocity_y": 0.0,
+        "pressure": 0.0,
+    }
+
+    with pytest.raises(SolverError, match="Pressure.*must be positive"):
         solve_case(case, (InitialState(),))
 
 

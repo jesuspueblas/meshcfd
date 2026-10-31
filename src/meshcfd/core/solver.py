@@ -64,6 +64,8 @@ class _Geometry:
     velocity_inlet_states: np.ndarray
     pressure_outlet_faces: np.ndarray
     pressure_outlet_pressures: np.ndarray
+    far_field_faces: np.ndarray
+    far_field_states: np.ndarray
     gradient_sources: np.ndarray
     gradient_neighbours: np.ndarray
     gradient_dx: np.ndarray
@@ -349,6 +351,7 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
             "Symmetry",
             "Velocity Inlet",
             "Pressure Outlet",
+            "Far Field",
         ):
             raise SolverError(
                 f"Boundary type '{condition.kind}' is not implemented by the solver."
@@ -381,6 +384,8 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
     velocity_inlet_states = []
     pressure_outlet_faces = []
     pressure_outlet_pressures = []
+    far_field_faces = []
+    far_field_states = []
     for patch_id, condition in conditions.items():
         faces = np.asarray(
             [
@@ -423,6 +428,27 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
             )
             pressure_outlet_faces.extend(faces.tolist())
             pressure_outlet_pressures.extend([pressure] * len(faces))
+        elif condition.kind == "Far Field":
+            density = _positive_boundary_value(
+                condition.values.get("density", 1.225),
+                f"Density for far field '{condition.patch_name}'",
+            )
+            velocity_x = _finite_boundary_value(
+                condition.values.get("velocity_x", 0.0),
+                f"Velocity X for far field '{condition.patch_name}'",
+            )
+            velocity_y = _finite_boundary_value(
+                condition.values.get("velocity_y", 0.0),
+                f"Velocity Y for far field '{condition.patch_name}'",
+            )
+            pressure = _positive_boundary_value(
+                condition.values.get("pressure", 101325.0),
+                f"Pressure for far field '{condition.patch_name}'",
+            )
+            far_field_faces.extend(faces.tolist())
+            far_field_states.extend(
+                [(density, velocity_x, velocity_y, pressure)] * len(faces)
+            )
 
     gradient_sources = []
     gradient_neighbours = []
@@ -474,6 +500,8 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
         pressure_outlet_pressures=np.asarray(
             pressure_outlet_pressures, dtype=float
         ),
+        far_field_faces=np.asarray(far_field_faces, dtype=int),
+        far_field_states=np.asarray(far_field_states, dtype=float).reshape((-1, 4)),
         gradient_sources=np.asarray(gradient_sources, dtype=int),
         gradient_neighbours=np.asarray(gradient_neighbours, dtype=int),
         gradient_dx=np.asarray(gradient_dx, dtype=float),
@@ -670,6 +698,27 @@ def _residual(
         )
         integrated = flux * geometry.face_lengths[faces, None]
         np.add.at(derivative, owners, -integrated / geometry.areas[owners, None])
+    if len(geometry.far_field_faces):
+        faces = geometry.far_field_faces
+        owners = geometry.owners[faces]
+        interior = _reconstruct(
+            primitive,
+            gradients,
+            factors,
+            owners,
+            geometry.face_centers[faces] - geometry.centers[owners],
+        )
+        exterior = _far_field_boundary_states(
+            interior,
+            geometry.far_field_states,
+            geometry.face_normals[faces],
+            gamma,
+        )
+        flux = numerical_flux(
+            interior, exterior, geometry.face_normals[faces], gamma, flux_scheme
+        )
+        integrated = flux * geometry.face_lengths[faces, None]
+        np.add.at(derivative, owners, -integrated / geometry.areas[owners, None])
     if not np.isfinite(derivative).all():
         raise SolverError("Spatial residual contains non-finite values.")
     return derivative
@@ -684,16 +733,31 @@ def _stable_time_step(
     sound_speed = _sound_speed(primitive, gamma)
     spectral_radius = np.abs(normal_velocity) + sound_speed[geometry.owners]
     boundary_faces = np.concatenate(
-        (geometry.velocity_inlet_faces, geometry.pressure_outlet_faces)
+        (
+            geometry.velocity_inlet_faces,
+            geometry.pressure_outlet_faces,
+            geometry.far_field_faces,
+        )
     )
     if len(boundary_faces):
         owners = geometry.owners[boundary_faces]
         exterior = primitive[owners].copy()
         inlet_count = len(geometry.velocity_inlet_faces)
+        outlet_end = inlet_count + len(geometry.pressure_outlet_faces)
         if inlet_count:
             exterior[:inlet_count] = geometry.velocity_inlet_states
         if len(geometry.pressure_outlet_faces):
-            exterior[inlet_count:, 3] = geometry.pressure_outlet_pressures
+            exterior[inlet_count:outlet_end, 3] = (
+                geometry.pressure_outlet_pressures
+            )
+        far_field_start = outlet_end
+        if len(geometry.far_field_faces):
+            exterior[far_field_start:] = _far_field_boundary_states(
+                primitive[owners[far_field_start:]],
+                geometry.far_field_states,
+                geometry.face_normals[boundary_faces[far_field_start:]],
+                gamma,
+            )
         exterior_normal_velocity = np.sum(
             exterior[:, 1:3] * geometry.face_normals[boundary_faces], axis=1
         )
@@ -728,6 +792,68 @@ def _stable_time_step(
 
 def _sound_speed(primitive: np.ndarray, gamma: float) -> np.ndarray:
     return np.sqrt(gamma * primitive[:, 3] / primitive[:, 0])
+
+
+def _far_field_boundary_states(
+    interior: np.ndarray,
+    far_field: np.ndarray,
+    normals: np.ndarray,
+    gamma: float,
+) -> np.ndarray:
+    normal_interior = np.sum(interior[:, 1:3] * normals, axis=1)
+    normal_far_field = np.sum(far_field[:, 1:3] * normals, axis=1)
+    sound_interior = _sound_speed(interior, gamma)
+    sound_far_field = _sound_speed(far_field, gamma)
+    exterior = interior.copy()
+
+    supersonic_inflow = normal_interior <= -sound_interior
+    supersonic_outflow = normal_interior >= sound_interior
+    exterior[supersonic_inflow] = far_field[supersonic_inflow]
+    subsonic = ~(supersonic_inflow | supersonic_outflow)
+    if not np.any(subsonic):
+        return exterior
+
+    normal = normals[subsonic]
+    inside = interior[subsonic]
+    outside = far_field[subsonic]
+    interior_velocity = normal_interior[subsonic]
+    far_field_velocity = normal_far_field[subsonic]
+    interior_sound = sound_interior[subsonic]
+    far_field_sound = sound_far_field[subsonic]
+    outgoing_invariant = interior_velocity + 2.0 * interior_sound / (gamma - 1.0)
+    incoming_invariant = far_field_velocity - 2.0 * far_field_sound / (gamma - 1.0)
+    boundary_velocity = 0.5 * (outgoing_invariant + incoming_invariant)
+    boundary_sound = 0.25 * (gamma - 1.0) * (
+        outgoing_invariant - incoming_invariant
+    )
+    if not np.isfinite(boundary_sound).all() or np.any(boundary_sound <= 0.0):
+        raise SolverError("Far-field characteristics produced invalid sound speed.")
+
+    inflow = boundary_velocity < 0.0
+    thermodynamic_source = np.where(inflow[:, None], outside, inside)
+    entropy = thermodynamic_source[:, 3] / thermodynamic_source[:, 0] ** gamma
+    density = (
+        boundary_sound**2 / (gamma * entropy)
+    ) ** (1.0 / (gamma - 1.0))
+    pressure = entropy * density**gamma
+    tangent = np.column_stack((-normal[:, 1], normal[:, 0]))
+    tangential_source = np.where(inflow[:, None], outside[:, 1:3], inside[:, 1:3])
+    tangential_velocity = np.sum(tangential_source * tangent, axis=1)
+    velocity = (
+        boundary_velocity[:, None] * normal
+        + tangential_velocity[:, None] * tangent
+    )
+    subsonic_states = np.column_stack(
+        (density, velocity[:, 0], velocity[:, 1], pressure)
+    )
+    if (
+        not np.isfinite(subsonic_states).all()
+        or np.any(subsonic_states[:, 0] <= 0.0)
+        or np.any(subsonic_states[:, 3] <= 0.0)
+    ):
+        raise SolverError("Far-field characteristics produced an invalid state.")
+    exterior[subsonic] = subsonic_states
+    return exterior
 
 
 def _finite_boundary_value(value: float, description: str) -> float:

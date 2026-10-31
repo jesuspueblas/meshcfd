@@ -47,7 +47,6 @@ BOUNDARY_FIELDS = {
         ("velocity_x", "Velocity X", 0.0),
         ("velocity_y", "Velocity Y", 0.0),
         ("pressure", "Pressure", 101325.0),
-        ("temperature", "Temperature", 288.15),
     ),
 }
 
