@@ -60,6 +60,10 @@ class _Geometry:
     periodic_faces_a: np.ndarray
     periodic_faces_b: np.ndarray
     periodic_pairs: tuple[PeriodicBoundaryPair, ...]
+    velocity_inlet_faces: np.ndarray
+    velocity_inlet_states: np.ndarray
+    pressure_outlet_faces: np.ndarray
+    pressure_outlet_pressures: np.ndarray
     gradient_sources: np.ndarray
     gradient_neighbours: np.ndarray
     gradient_dx: np.ndarray
@@ -130,6 +134,8 @@ def solve_case(
         raise SolverError("Current solution step must be a non-negative integer.")
     if not math.isfinite(settings.gamma) or settings.gamma <= 1.0:
         raise SolverError("Specific heat ratio must be finite and greater than 1.")
+    if not math.isfinite(settings.gas_constant) or settings.gas_constant <= 0.0:
+        raise SolverError("Gas constant must be positive and finite.")
 
     mesh = case.mesh
     geometry = _build_geometry(mesh, case)
@@ -337,7 +343,13 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
     if set(conditions) != {patch.id for patch in mesh.patches}:
         raise SolverError("Boundary conditions must be defined for every mesh patch.")
     for patch_id, condition in conditions.items():
-        if condition.kind not in ("Periodic", "Wall", "Symmetry"):
+        if condition.kind not in (
+            "Periodic",
+            "Wall",
+            "Symmetry",
+            "Velocity Inlet",
+            "Pressure Outlet",
+        ):
             raise SolverError(
                 f"Boundary type '{condition.kind}' is not implemented by the solver."
             )
@@ -365,6 +377,52 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
         ],
         dtype=int,
     )
+    velocity_inlet_faces = []
+    velocity_inlet_states = []
+    pressure_outlet_faces = []
+    pressure_outlet_pressures = []
+    for patch_id, condition in conditions.items():
+        faces = np.asarray(
+            [
+                face_id
+                for face_id in boundary_faces
+                if int(patch_ids[face_id]) == patch_id
+            ],
+            dtype=int,
+        )
+        if condition.kind == "Velocity Inlet":
+            density = _positive_boundary_value(
+                condition.values.get("density", 1.225),
+                f"Density for velocity inlet '{condition.patch_name}'",
+            )
+            temperature = _positive_boundary_value(
+                condition.values.get("temperature", 288.15),
+                f"Temperature for velocity inlet '{condition.patch_name}'",
+            )
+            velocity_x = _finite_boundary_value(
+                condition.values.get("velocity_x", 0.0),
+                f"Velocity X for inlet '{condition.patch_name}'",
+            )
+            velocity_y = _finite_boundary_value(
+                condition.values.get("velocity_y", 0.0),
+                f"Velocity Y for inlet '{condition.patch_name}'",
+            )
+            pressure = density * case.numerics.gas_constant * temperature
+            if not math.isfinite(pressure) or pressure <= 0.0:
+                raise SolverError(
+                    f"Velocity inlet '{condition.patch_name}' produces invalid pressure."
+                )
+            velocity_inlet_faces.extend(faces.tolist())
+            velocity_inlet_states.extend(
+                [(density, velocity_x, velocity_y, pressure)] * len(faces)
+            )
+        elif condition.kind == "Pressure Outlet":
+            pressure = _positive_boundary_value(
+                condition.values.get("pressure", 101325.0),
+                f"Static pressure for outlet '{condition.patch_name}'",
+            )
+            pressure_outlet_faces.extend(faces.tolist())
+            pressure_outlet_pressures.extend([pressure] * len(faces))
 
     gradient_sources = []
     gradient_neighbours = []
@@ -408,6 +466,14 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
         periodic_faces_a=np.asarray([item[0] for item in periodic_mappings], dtype=int),
         periodic_faces_b=np.asarray([item[1] for item in periodic_mappings], dtype=int),
         periodic_pairs=tuple(case.periodic_pairs),
+        velocity_inlet_faces=np.asarray(velocity_inlet_faces, dtype=int),
+        velocity_inlet_states=np.asarray(velocity_inlet_states, dtype=float).reshape(
+            (-1, 4)
+        ),
+        pressure_outlet_faces=np.asarray(pressure_outlet_faces, dtype=int),
+        pressure_outlet_pressures=np.asarray(
+            pressure_outlet_pressures, dtype=float
+        ),
         gradient_sources=np.asarray(gradient_sources, dtype=int),
         gradient_neighbours=np.asarray(gradient_neighbours, dtype=int),
         gradient_dx=np.asarray(gradient_dx, dtype=float),
@@ -571,6 +637,39 @@ def _residual(
         )
         integrated = flux * geometry.face_lengths[faces, None]
         np.add.at(derivative, owners, -integrated / geometry.areas[owners, None])
+    if len(geometry.velocity_inlet_faces):
+        faces = geometry.velocity_inlet_faces
+        owners = geometry.owners[faces]
+        interior = _reconstruct(
+            primitive,
+            gradients,
+            factors,
+            owners,
+            geometry.face_centers[faces] - geometry.centers[owners],
+        )
+        exterior = geometry.velocity_inlet_states
+        flux = numerical_flux(
+            interior, exterior, geometry.face_normals[faces], gamma, flux_scheme
+        )
+        integrated = flux * geometry.face_lengths[faces, None]
+        np.add.at(derivative, owners, -integrated / geometry.areas[owners, None])
+    if len(geometry.pressure_outlet_faces):
+        faces = geometry.pressure_outlet_faces
+        owners = geometry.owners[faces]
+        interior = _reconstruct(
+            primitive,
+            gradients,
+            factors,
+            owners,
+            geometry.face_centers[faces] - geometry.centers[owners],
+        )
+        exterior = interior.copy()
+        exterior[:, 3] = geometry.pressure_outlet_pressures
+        flux = numerical_flux(
+            interior, exterior, geometry.face_normals[faces], gamma, flux_scheme
+        )
+        integrated = flux * geometry.face_lengths[faces, None]
+        np.add.at(derivative, owners, -integrated / geometry.areas[owners, None])
     if not np.isfinite(derivative).all():
         raise SolverError("Spatial residual contains non-finite values.")
     return derivative
@@ -584,6 +683,26 @@ def _stable_time_step(
     )
     sound_speed = _sound_speed(primitive, gamma)
     spectral_radius = np.abs(normal_velocity) + sound_speed[geometry.owners]
+    boundary_faces = np.concatenate(
+        (geometry.velocity_inlet_faces, geometry.pressure_outlet_faces)
+    )
+    if len(boundary_faces):
+        owners = geometry.owners[boundary_faces]
+        exterior = primitive[owners].copy()
+        inlet_count = len(geometry.velocity_inlet_faces)
+        if inlet_count:
+            exterior[:inlet_count] = geometry.velocity_inlet_states
+        if len(geometry.pressure_outlet_faces):
+            exterior[inlet_count:, 3] = geometry.pressure_outlet_pressures
+        exterior_normal_velocity = np.sum(
+            exterior[:, 1:3] * geometry.face_normals[boundary_faces], axis=1
+        )
+        exterior_radius = np.abs(exterior_normal_velocity) + _sound_speed(
+            exterior, gamma
+        )
+        spectral_radius[boundary_faces] = np.maximum(
+            spectral_radius[boundary_faces], exterior_radius
+        )
     spectral_sum = np.zeros(len(primitive), dtype=float)
     np.add.at(
         spectral_sum,
@@ -609,3 +728,22 @@ def _stable_time_step(
 
 def _sound_speed(primitive: np.ndarray, gamma: float) -> np.ndarray:
     return np.sqrt(gamma * primitive[:, 3] / primitive[:, 0])
+
+
+def _finite_boundary_value(value: float, description: str) -> float:
+    if isinstance(value, bool):
+        raise SolverError(f"{description} must be finite.")
+    try:
+        number = float(value)
+    except (OverflowError, TypeError, ValueError) as error:
+        raise SolverError(f"{description} must be finite.") from error
+    if not math.isfinite(number):
+        raise SolverError(f"{description} must be finite.")
+    return number
+
+
+def _positive_boundary_value(value: float, description: str) -> float:
+    number = _finite_boundary_value(value, description)
+    if number <= 0.0:
+        raise SolverError(f"{description} must be positive.")
+    return number

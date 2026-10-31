@@ -51,8 +51,12 @@ field values and positive limits. Enable the color-bar icon to display a
 floating legend over the mesh; drag the legend itself to move it, use its
 bottom-right grip to resize it, and select horizontal or vertical orientation.
 
-The transient solver currently supports periodic, inviscid slip-wall, and
-symmetry boundaries. Other boundary types and the selectable MUSCL-parabolic
+The transient solver supports periodic, inviscid slip-wall, symmetry,
+velocity-inlet, and pressure-outlet boundaries. A velocity inlet prescribes
+density, velocity components, and temperature; inlet pressure is calculated
+with the ideal-gas law and configured gas constant. A pressure outlet
+extrapolates density and velocity from the interior and imposes the configured
+static pressure. Pressure inlet, far-field, and the selectable MUSCL-parabolic
 reconstruction are not implemented and are reported as solver errors. Runs
 stop at the configured End time or maximum time-step count; the residual is
 reported for monitoring and does not terminate an unsteady run.

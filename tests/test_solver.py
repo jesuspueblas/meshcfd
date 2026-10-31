@@ -204,6 +204,83 @@ def test_periodic_solver_conserves_integrated_euler_state(flux, integrator):
     )
 
 
+@pytest.mark.parametrize("flux", ("Rusanov", "HLLC", "Roe"))
+def test_velocity_inlet_and_pressure_outlet_preserve_matching_uniform_flow(flux):
+    case = make_periodic_case()
+    case.periodic_pairs.clear()
+    case.numerics.flux = flux
+    case.numerics.gas_constant = 1.0
+    case.numerics.end_time = 0.01
+    for condition in case.boundary_conditions:
+        condition.kind = "Wall"
+        condition.values.clear()
+    case.boundary_conditions[1].kind = "Pressure Outlet"
+    case.boundary_conditions[1].values = {"pressure": 1.0}
+    case.boundary_conditions[3].kind = "Velocity Inlet"
+    case.boundary_conditions[3].values = {
+        "density": 1.0,
+        "velocity_x": 1.0,
+        "velocity_y": 0.0,
+        "temperature": 1.0,
+    }
+
+    result = solve_case(case, (InitialState(1.0, 1.0, 0.0, 1.0),))
+
+    assert result.completed
+    np.testing.assert_allclose(
+        [
+            result.states[0].density,
+            result.states[0].velocity_x,
+            result.states[0].velocity_y,
+            result.states[0].pressure,
+        ],
+        (1.0, 1.0, 0.0, 1.0),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+
+
+def test_pressure_outlet_applies_configured_static_pressure():
+    case = make_periodic_case()
+    case.periodic_pairs.clear()
+    case.numerics.gas_constant = 1.0
+    case.numerics.end_time = 0.01
+    case.numerics.max_iterations = 1
+    for condition in case.boundary_conditions:
+        condition.kind = "Wall"
+        condition.values.clear()
+    case.boundary_conditions[1].kind = "Pressure Outlet"
+    case.boundary_conditions[1].values = {"pressure": 0.8}
+    case.boundary_conditions[3].kind = "Velocity Inlet"
+    case.boundary_conditions[3].values = {
+        "density": 1.0,
+        "velocity_x": 0.0,
+        "velocity_y": 0.0,
+        "temperature": 1.0,
+    }
+
+    result = solve_case(case, (InitialState(1.0, 0.0, 0.0, 1.0),))
+
+    assert result.states[0].velocity_x > 0.0
+
+
+def test_velocity_inlet_rejects_non_positive_density():
+    case = make_periodic_case()
+    case.periodic_pairs.clear()
+    for condition in case.boundary_conditions:
+        condition.kind = "Wall"
+    case.boundary_conditions[3].kind = "Velocity Inlet"
+    case.boundary_conditions[3].values = {
+        "density": 0.0,
+        "velocity_x": 1.0,
+        "velocity_y": 0.0,
+        "temperature": 1.0,
+    }
+
+    with pytest.raises(SolverError, match="Density.*must be positive"):
+        solve_case(case, (InitialState(),))
+
+
 def test_solver_reports_iteration_limit_and_rejects_unsupported_choices():
     case = make_periodic_case()
     case.numerics.end_time = 10.0
