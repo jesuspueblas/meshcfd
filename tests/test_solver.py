@@ -19,11 +19,14 @@ from meshcfd.core.solver import (
     SolverError,
     SolverProgress,
     _build_geometry,
+    _dynamic_viscosity,
     _far_field_boundary_states,
     _mass_flow_inlet_boundary_states,
     _mass_flow_outlet_boundary_states,
     _parabolic_reconstruction,
     _pressure_inlet_boundary_states,
+    _residual,
+    _viscous_flux,
     solve_case,
 )
 
@@ -128,6 +131,132 @@ def test_numerical_fluxes_return_physical_flux_for_equal_states(scheme):
     flux = numerical_flux(states, states, normals, 1.4, scheme)
 
     np.testing.assert_allclose(flux, expected, rtol=1e-12, atol=1e-12)
+
+
+def test_sutherland_viscosity_uses_reference_air_values():
+    settings = Case().numerics
+    settings.viscosity_model = "Sutherland"
+
+    viscosity = _dynamic_viscosity(
+        np.array((273.15, 300.0)), settings
+    )
+
+    assert viscosity[0] == pytest.approx(1.716e-5)
+    assert viscosity[1] > viscosity[0]
+
+
+def test_constant_body_acceleration_adds_momentum_and_energy_sources():
+    case = make_periodic_case()
+    case.numerics.gas_constant = 1.0
+    case.numerics.reconstruction = "First order"
+    case.numerics.acceleration_x = 2.0
+    case.numerics.acceleration_y = -3.0
+    geometry = _build_geometry(case.mesh, case)
+    conservative = primitive_to_conservative(
+        np.array(((1.0, 0.4, -0.2, 1.0),)), case.numerics.gamma
+    )
+
+    derivative = _residual(conservative, geometry, case.numerics)
+
+    np.testing.assert_allclose(derivative[0], (0.0, 2.0, -3.0, 1.4), atol=1e-14)
+
+
+def test_viscous_flux_includes_heat_conduction_and_stokes_stress():
+    gradients = np.array((((2.0, 1.0), (2.0, 3.0), (4.0, -1.0)),))
+    velocity = np.array(((5.0, 7.0),))
+
+    flux = _viscous_flux(
+        gradients,
+        velocity,
+        np.array((2.0,)),
+        np.array((3.0,)),
+        np.array(((1.0, 0.0),)),
+    )
+
+    assert flux[0, 0] == 0.0
+    assert flux[0, 1] == pytest.approx(2.0 * (4.0 - 10.0 / 3.0))
+    assert flux[0, 2] == pytest.approx(2.0 * (1.0 + 2.0))
+    assert flux[0, 3] == pytest.approx(5.0 * flux[0, 1] + 7.0 * flux[0, 2] + 12.0)
+
+
+def test_wall_heat_flux_positive_into_fluid_adds_energy():
+    case = make_periodic_case()
+    case.periodic_pairs.clear()
+    case.numerics.gas_constant = 1.0
+    case.numerics.reconstruction = "First order"
+    case.numerics.viscosity_model = "Constant"
+    case.numerics.dynamic_viscosity = 1.0
+    for condition in case.boundary_conditions:
+        condition.kind = "Wall"
+        condition.thermal_condition = "Temperature"
+        condition.values = {"temperature": 1.0}
+    wall = case.boundary_conditions[1]
+    wall.thermal_condition = "Heat Flux"
+    wall.values = {"heat_flux": 10.0}
+    geometry = _build_geometry(case.mesh, case)
+    conservative = primitive_to_conservative(
+        np.array(((1.0, 0.0, 0.0, 1.0),)), case.numerics.gamma
+    )
+
+    derivative = _residual(conservative, geometry, case.numerics)
+
+    assert derivative[0, 3] == pytest.approx(10.0)
+    np.testing.assert_allclose(derivative[0, :3], 0.0, atol=1e-12)
+
+
+def test_wall_heat_flux_is_exact_with_sutherland_viscosity():
+    case = make_periodic_case()
+    case.periodic_pairs.clear()
+    case.numerics.gas_constant = 1.0
+    case.numerics.reconstruction = "First order"
+    case.numerics.viscosity_model = "Sutherland"
+    case.numerics.sutherland_reference_viscosity = 1.0
+    case.numerics.sutherland_reference_temperature = 1.0
+    case.numerics.sutherland_temperature = 0.1
+    for condition in case.boundary_conditions:
+        condition.kind = "Wall"
+        condition.thermal_condition = "Heat Flux"
+        condition.values = {"heat_flux": 0.0}
+    wall = case.boundary_conditions[1]
+    wall.values["heat_flux"] = 10.0
+    geometry = _build_geometry(case.mesh, case)
+    conservative = primitive_to_conservative(
+        np.array(((1.0, 0.0, 0.0, 1.0),)), case.numerics.gamma
+    )
+
+    derivative = _residual(conservative, geometry, case.numerics)
+
+    assert derivative[0, 3] == pytest.approx(10.0)
+    np.testing.assert_allclose(derivative[0, :3], 0.0, atol=1e-12)
+
+
+def test_viscous_wall_slip_and_no_slip_are_distinct():
+    case = make_periodic_case()
+    case.numerics.reconstruction = "First order"
+    case.numerics.viscosity_model = "Constant"
+    case.numerics.dynamic_viscosity = 1.0
+    case.numerics.gas_constant = 1.0
+    case.periodic_pairs = [case.periodic_pairs[0]]
+    for boundary in case.boundary_conditions:
+        boundary.kind = "Wall" if boundary.patch_id in (0, 2) else "Periodic"
+    for boundary in case.boundary_conditions:
+        boundary.thermal_condition = "Temperature"
+        boundary.values = {"temperature": 1.0}
+    initial = np.array(((1.0, 1.0, 0.0, 1.0),))
+    conservative = primitive_to_conservative(initial, case.numerics.gamma)
+
+    case.boundary_conditions[0].mechanical_condition = "Slip"
+    case.boundary_conditions[2].mechanical_condition = "Slip"
+    geometry = _build_geometry(case.mesh, case)
+    slip_derivative = _residual(conservative, geometry, case.numerics)
+    case.boundary_conditions[0].mechanical_condition = "No-slip"
+    case.boundary_conditions[2].mechanical_condition = "No-slip"
+    geometry = _build_geometry(case.mesh, case)
+    no_slip_derivative = _residual(conservative, geometry, case.numerics)
+
+    np.testing.assert_allclose(slip_derivative[0, 1:3], 0.0, atol=1e-12)
+    assert no_slip_derivative[0, 1] < 0.0
+    assert no_slip_derivative[0, 2] == pytest.approx(0.0, abs=1e-12)
 
 
 @pytest.mark.parametrize("flux", ("Rusanov", "HLLC", "Roe"))

@@ -1,4 +1,4 @@
-"""Explicit finite-volume solver for the two-dimensional ideal-gas Euler equations."""
+"""Explicit finite-volume solver for compressible ideal-gas flow."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from meshcfd.core.model import (
     Case,
     FiniteVolumeMesh,
     InitialState,
+    NumericalSettings,
     PeriodicBoundaryPair,
 )
 from meshcfd.core.periodic import detect_periodic_pair, match_periodic_faces
@@ -71,6 +72,15 @@ class _MassFlowOutlet:
 
 
 @dataclass(frozen=True)
+class _WallThermalBoundary:
+    faces: np.ndarray
+    condition: str
+    value: float
+    patch_name: str
+    mechanical_condition: str
+
+
+@dataclass(frozen=True)
 class _Geometry:
     centers: np.ndarray
     areas: np.ndarray
@@ -80,8 +90,11 @@ class _Geometry:
     owners: np.ndarray
     neighbours: np.ndarray
     patch_ids: np.ndarray
+    patch_kinds: dict[int, str]
     interior_faces: np.ndarray
     wall_faces: np.ndarray
+    symmetry_faces: np.ndarray
+    diffusive_boundary_faces: np.ndarray
     periodic_faces_a: np.ndarray
     periodic_faces_b: np.ndarray
     periodic_pairs: tuple[PeriodicBoundaryPair, ...]
@@ -94,6 +107,7 @@ class _Geometry:
     pressure_inlets: tuple[_PressureInlet, ...]
     mass_flow_inlets: tuple[_MassFlowInlet, ...]
     mass_flow_outlets: tuple[_MassFlowOutlet, ...]
+    wall_thermal_boundaries: tuple[_WallThermalBoundary, ...]
     gradient_sources: np.ndarray
     gradient_neighbours: np.ndarray
     gradient_dx: np.ndarray
@@ -169,6 +183,24 @@ def solve_case(
         raise SolverError("Specific heat ratio must be finite and greater than 1.")
     if not math.isfinite(settings.gas_constant) or settings.gas_constant <= 0.0:
         raise SolverError("Gas constant must be positive and finite.")
+    if settings.viscosity_model not in ("Inviscid", "Constant", "Sutherland"):
+        raise SolverError("Unsupported viscosity model.")
+    for value, description in (
+        (settings.dynamic_viscosity, "Dynamic viscosity"),
+        (settings.sutherland_reference_viscosity, "Sutherland reference viscosity"),
+        (
+            settings.sutherland_reference_temperature,
+            "Sutherland reference temperature",
+        ),
+        (settings.sutherland_temperature, "Sutherland temperature"),
+        (settings.prandtl_number, "Prandtl number"),
+    ):
+        if not math.isfinite(value) or value <= 0.0:
+            raise SolverError(f"{description} must be positive and finite.")
+    if not math.isfinite(settings.acceleration_x) or not math.isfinite(
+        settings.acceleration_y
+    ):
+        raise SolverError("Body-force acceleration must be finite.")
 
     mesh = case.mesh
     geometry = _build_geometry(mesh, case)
@@ -203,30 +235,18 @@ def solve_case(
         try:
             primitive = conservative_to_primitive(conservative, settings.gamma)
             time_step = min(
-                _stable_time_step(
-                    primitive,
-                    geometry,
-                    settings.gamma,
-                    settings.cfl,
-                    settings.gas_constant,
-                ),
+                _stable_time_step(primitive, geometry, settings),
                 settings.end_time - time,
             )
             if not math.isfinite(time_step) or time_step <= 0.0:
                 raise SolverError("The stable time step is non-positive or non-finite.")
             start = conservative
-            derivative = _residual(
-                start, geometry, settings.gamma, settings.flux,
-                settings.reconstruction, settings.limiter, settings.gas_constant,
-            )
+            derivative = _residual(start, geometry, settings)
             if settings.time_integration == "Explicit Euler":
                 conservative = start + time_step * derivative
             else:
                 stage_one = start + time_step * derivative
-                derivative_one = _residual(
-                    stage_one, geometry, settings.gamma, settings.flux,
-                    settings.reconstruction, settings.limiter, settings.gas_constant,
-                )
+                derivative_one = _residual(stage_one, geometry, settings)
                 if settings.time_integration == "Explicit RK2":
                     conservative = 0.5 * start + 0.5 * (
                         stage_one + time_step * derivative_one
@@ -235,10 +255,7 @@ def solve_case(
                     stage_two = 0.75 * start + 0.25 * (
                         stage_one + time_step * derivative_one
                     )
-                    derivative_two = _residual(
-                        stage_two, geometry, settings.gamma, settings.flux,
-                        settings.reconstruction, settings.limiter, settings.gas_constant,
-                    )
+                    derivative_two = _residual(stage_two, geometry, settings)
                     conservative = (1.0 / 3.0) * start + (2.0 / 3.0) * (
                         stage_two + time_step * derivative_two
                     )
@@ -282,15 +299,7 @@ def solve_case(
 
     final_primitive = conservative_to_primitive(conservative, settings.gamma)
     try:
-        final_residual = _residual(
-            conservative,
-            geometry,
-            settings.gamma,
-            settings.flux,
-            settings.reconstruction,
-            settings.limiter,
-            settings.gas_constant,
-        )
+        final_residual = _residual(conservative, geometry, settings)
     except ValueError as error:
         raise SolverError(f"Could not evaluate final residual: {error}") from error
     residual = float(np.sqrt(np.mean(final_residual**2)))
@@ -421,6 +430,19 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
         ],
         dtype=int,
     )
+    symmetry_faces = np.array(
+        [
+            face_id
+            for face_id in boundary_faces
+            if int(face_id) not in periodic_face_set
+            and conditions[int(patch_ids[face_id])].kind == "Symmetry"
+        ],
+        dtype=int,
+    )
+    diffusive_boundary_faces = np.asarray(
+        [face_id for face_id in boundary_faces if face_id not in periodic_face_set],
+        dtype=int,
+    )
     velocity_inlet_faces = []
     velocity_inlet_states = []
     pressure_outlet_faces = []
@@ -430,6 +452,7 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
     pressure_inlets = []
     mass_flow_inlets = []
     mass_flow_outlets = []
+    wall_thermal_boundaries = []
     for patch_id, condition in conditions.items():
         faces = np.asarray(
             [
@@ -464,6 +487,37 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
             velocity_inlet_faces.extend(faces.tolist())
             velocity_inlet_states.extend(
                 [(density, velocity_x, velocity_y, pressure)] * len(faces)
+            )
+        elif condition.kind == "Wall" and case.numerics.viscosity_model != "Inviscid":
+            mechanical_condition = condition.mechanical_condition
+            if mechanical_condition not in ("Slip", "No-slip"):
+                raise SolverError(
+                    f"Unsupported mechanical condition on wall "
+                    f"'{condition.patch_name}'."
+                )
+            thermal_condition = condition.thermal_condition
+            if thermal_condition == "Temperature":
+                value = _positive_boundary_value(
+                    condition.values.get("temperature", 300.0),
+                    f"Wall temperature for '{condition.patch_name}'",
+                )
+            elif thermal_condition == "Heat Flux":
+                value = _finite_boundary_value(
+                    condition.values.get("heat_flux", 0.0),
+                    f"Wall heat flux for '{condition.patch_name}'",
+                )
+            else:
+                raise SolverError(
+                    f"Unsupported thermal condition on wall '{condition.patch_name}'."
+                )
+            wall_thermal_boundaries.append(
+                _WallThermalBoundary(
+                    faces,
+                    thermal_condition,
+                    value,
+                    condition.patch_name,
+                    mechanical_condition,
+                )
             )
         elif condition.kind == "Pressure Outlet":
             pressure = _positive_boundary_value(
@@ -600,8 +654,11 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
         owners=owners,
         neighbours=neighbours,
         patch_ids=patch_ids,
+        patch_kinds={patch_id: condition.kind for patch_id, condition in conditions.items()},
         interior_faces=interior_faces,
         wall_faces=wall_faces,
+        symmetry_faces=symmetry_faces,
+        diffusive_boundary_faces=diffusive_boundary_faces,
         periodic_faces_a=np.asarray([item[0] for item in periodic_mappings], dtype=int),
         periodic_faces_b=np.asarray([item[1] for item in periodic_mappings], dtype=int),
         periodic_pairs=tuple(case.periodic_pairs),
@@ -618,6 +675,7 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
         pressure_inlets=tuple(pressure_inlets),
         mass_flow_inlets=tuple(mass_flow_inlets),
         mass_flow_outlets=tuple(mass_flow_outlets),
+        wall_thermal_boundaries=tuple(wall_thermal_boundaries),
         gradient_sources=np.asarray(gradient_sources, dtype=int),
         gradient_neighbours=np.asarray(gradient_neighbours, dtype=int),
         gradient_dx=np.asarray(gradient_dx, dtype=float),
@@ -872,20 +930,19 @@ def _reconstruct(
 def _residual(
     conservative: np.ndarray,
     geometry: _Geometry,
-    gamma: float,
-    flux_scheme: str,
-    reconstruction: str,
-    limiter: str,
-    gas_constant: float,
+    settings: NumericalSettings,
 ) -> np.ndarray:
-    primitive = conservative_to_primitive(conservative, gamma)
+    gamma = settings.gamma
     curvature = None
-    if reconstruction == "MUSCL parabolic":
+    primitive = conservative_to_primitive(conservative, gamma)
+    if settings.reconstruction == "MUSCL parabolic":
         gradients, curvature, factors = _parabolic_reconstruction(
-            primitive, geometry, limiter
+            primitive, geometry, settings.limiter
         )
-    elif reconstruction == "MUSCL linear":
-        gradients, factors = _limited_gradients(primitive, geometry, limiter)
+    elif settings.reconstruction == "MUSCL linear":
+        gradients, factors = _limited_gradients(
+            primitive, geometry, settings.limiter
+        )
     else:
         gradients = np.zeros((len(primitive), 4, 2))
         factors = np.ones((len(primitive), 4))
@@ -909,7 +966,7 @@ def _residual(
             geometry.face_centers[faces] - geometry.centers[neighbours],
         )
         flux = numerical_flux(
-            left, right, geometry.face_normals[faces], gamma, flux_scheme
+            left, right, geometry.face_normals[faces], gamma, settings.flux
         )
         integrated = flux * geometry.face_lengths[faces, None]
         np.add.at(derivative, owners, -integrated / geometry.areas[owners, None])
@@ -928,7 +985,7 @@ def _residual(
             geometry.face_centers[faces_b] - geometry.centers[owners_b],
         )
         flux = numerical_flux(
-            left, right, geometry.face_normals[faces_a], gamma, flux_scheme
+            left, right, geometry.face_normals[faces_a], gamma, settings.flux
         )
         integrated = flux * geometry.face_lengths[faces_a, None]
         np.add.at(
@@ -950,7 +1007,7 @@ def _residual(
         )
         right[:, 1:3] -= 2.0 * normal_velocity[:, None] * geometry.face_normals[faces]
         flux = numerical_flux(
-            left, right, geometry.face_normals[faces], gamma, flux_scheme
+            left, right, geometry.face_normals[faces], gamma, settings.flux
         )
         integrated = flux * geometry.face_lengths[faces, None]
         np.add.at(derivative, owners, -integrated / geometry.areas[owners, None])
@@ -963,7 +1020,7 @@ def _residual(
         )
         exterior = geometry.velocity_inlet_states
         flux = numerical_flux(
-            interior, exterior, geometry.face_normals[faces], gamma, flux_scheme
+            interior, exterior, geometry.face_normals[faces], gamma, settings.flux
         )
         integrated = flux * geometry.face_lengths[faces, None]
         np.add.at(derivative, owners, -integrated / geometry.areas[owners, None])
@@ -977,7 +1034,7 @@ def _residual(
         exterior = interior.copy()
         exterior[:, 3] = geometry.pressure_outlet_pressures
         flux = numerical_flux(
-            interior, exterior, geometry.face_normals[faces], gamma, flux_scheme
+            interior, exterior, geometry.face_normals[faces], gamma, settings.flux
         )
         integrated = flux * geometry.face_lengths[faces, None]
         np.add.at(derivative, owners, -integrated / geometry.areas[owners, None])
@@ -995,7 +1052,7 @@ def _residual(
             gamma,
         )
         flux = numerical_flux(
-            interior, exterior, geometry.face_normals[faces], gamma, flux_scheme
+            interior, exterior, geometry.face_normals[faces], gamma, settings.flux
         )
         integrated = flux * geometry.face_lengths[faces, None]
         np.add.at(derivative, owners, -integrated / geometry.areas[owners, None])
@@ -1011,10 +1068,10 @@ def _residual(
             geometry.face_normals[faces],
             boundary,
             gamma,
-            gas_constant,
+            settings.gas_constant,
         )
         flux = numerical_flux(
-            interior, exterior, geometry.face_normals[faces], gamma, flux_scheme
+            interior, exterior, geometry.face_normals[faces], gamma, settings.flux
         )
         integrated = flux * geometry.face_lengths[faces, None]
         np.add.at(derivative, owners, -integrated / geometry.areas[owners, None])
@@ -1031,10 +1088,10 @@ def _residual(
             geometry.face_lengths[faces],
             boundary,
             gamma,
-            gas_constant,
+            settings.gas_constant,
         )
         flux = numerical_flux(
-            interior, exterior, geometry.face_normals[faces], gamma, flux_scheme
+            interior, exterior, geometry.face_normals[faces], gamma, settings.flux
         )
         integrated = flux * geometry.face_lengths[faces, None]
         np.add.at(derivative, owners, -integrated / geometry.areas[owners, None])
@@ -1052,22 +1109,461 @@ def _residual(
             boundary,
         )
         flux = numerical_flux(
-            interior, exterior, geometry.face_normals[faces], gamma, flux_scheme
+            interior, exterior, geometry.face_normals[faces], gamma, settings.flux
         )
         integrated = flux * geometry.face_lengths[faces, None]
         np.add.at(derivative, owners, -integrated / geometry.areas[owners, None])
+    if settings.viscosity_model != "Inviscid":
+        derivative += _viscous_residual(primitive, geometry, settings)
+    if settings.acceleration_x != 0.0 or settings.acceleration_y != 0.0:
+        derivative[:, 1] += primitive[:, 0] * settings.acceleration_x
+        derivative[:, 2] += primitive[:, 0] * settings.acceleration_y
+        derivative[:, 3] += primitive[:, 0] * (
+            settings.acceleration_x * primitive[:, 1]
+            + settings.acceleration_y * primitive[:, 2]
+        )
     if not np.isfinite(derivative).all():
         raise SolverError("Spatial residual contains non-finite values.")
+    return derivative
+
+
+def _dynamic_viscosity(
+    temperature: np.ndarray, settings: NumericalSettings
+) -> np.ndarray:
+    if settings.viscosity_model == "Constant":
+        return np.full_like(temperature, settings.dynamic_viscosity, dtype=float)
+    if settings.viscosity_model == "Sutherland":
+        reference_temperature = settings.sutherland_reference_temperature
+        viscosity = settings.sutherland_reference_viscosity * (
+            temperature / reference_temperature
+        ) ** 1.5
+        viscosity *= (reference_temperature + settings.sutherland_temperature) / (
+            temperature + settings.sutherland_temperature
+        )
+        if not np.isfinite(viscosity).all() or np.any(viscosity <= 0.0):
+            raise SolverError("Sutherland law produced an invalid viscosity.")
+        return viscosity
+    return np.zeros_like(temperature, dtype=float)
+
+
+def _viscous_inlet_states(
+    primitive: np.ndarray, geometry: _Geometry, settings: NumericalSettings
+) -> dict[int, np.ndarray]:
+    states_by_face = {
+        int(face_id): state
+        for face_id, state in zip(
+            geometry.velocity_inlet_faces, geometry.velocity_inlet_states
+        )
+    }
+    for boundary in geometry.pressure_inlets:
+        faces = boundary.faces
+        states = _pressure_inlet_boundary_states(
+            primitive[geometry.owners[faces]],
+            geometry.face_normals[faces],
+            boundary,
+            settings.gamma,
+            settings.gas_constant,
+        )
+        states_by_face.update(
+            {int(face_id): state for face_id, state in zip(faces, states)}
+        )
+    for boundary in geometry.mass_flow_inlets:
+        faces = boundary.faces
+        states = _mass_flow_inlet_boundary_states(
+            primitive[geometry.owners[faces]],
+            geometry.face_normals[faces],
+            geometry.face_lengths[faces],
+            boundary,
+            settings.gamma,
+            settings.gas_constant,
+        )
+        states_by_face.update(
+            {int(face_id): state for face_id, state in zip(faces, states)}
+        )
+    if len(geometry.far_field_faces):
+        faces = geometry.far_field_faces
+        states = _far_field_boundary_states(
+            primitive[geometry.owners[faces]],
+            geometry.far_field_states,
+            geometry.face_normals[faces],
+            settings.gamma,
+        )
+        states_by_face.update(
+            {int(face_id): state for face_id, state in zip(faces, states)}
+        )
+    return states_by_face
+
+
+def _viscous_gradients(
+    primitive: np.ndarray, geometry: _Geometry, settings: NumericalSettings
+) -> np.ndarray:
+    density = primitive[:, 0]
+    temperature = primitive[:, 3] / (density * settings.gas_constant)
+    if not np.isfinite(temperature).all() or np.any(temperature <= 0.0):
+        raise SolverError("Viscous flow requires finite positive temperature.")
+    cell_values = np.column_stack((primitive[:, 1:3], temperature))
+    sources = [geometry.gradient_sources]
+    neighbours = [geometry.gradient_neighbours]
+    dx_values = [geometry.gradient_dx]
+    dy_values = [geometry.gradient_dy]
+    differences = [cell_values[geometry.gradient_neighbours] - cell_values[geometry.gradient_sources]]
+
+    inlet_values = {
+        face_id: np.array(
+            (state[1], state[2], state[3] / (state[0] * settings.gas_constant))
+        )
+        for face_id, state in _viscous_inlet_states(
+            primitive, geometry, settings
+        ).items()
+    }
+
+    wall_by_face = {
+        int(face_id): boundary
+        for boundary in geometry.wall_thermal_boundaries
+        for face_id in boundary.faces
+    }
+    boundary_sources = []
+    boundary_neighbours = []
+    boundary_dx = []
+    boundary_dy = []
+    boundary_differences = []
+    for face_id in geometry.diffusive_boundary_faces:
+        owner = int(geometry.owners[face_id])
+        normal = geometry.face_normals[face_id]
+        offset = geometry.face_centers[face_id] - geometry.centers[owner]
+        kind = geometry.patch_kinds[int(geometry.patch_ids[face_id])]
+        normal_distance = float(np.dot(offset, normal))
+        ghost_offset = (
+            2.0 * normal_distance * normal
+            if kind in ("Wall", "Symmetry")
+            else 2.0 * offset
+        )
+        ghost = cell_values[owner].copy()
+        if kind == "Wall":
+            wall = wall_by_face[int(face_id)]
+            if wall.mechanical_condition == "No-slip":
+                ghost[:2] *= -1.0
+            else:
+                ghost[:2] -= (
+                    2.0 * float(np.dot(ghost[:2], normal)) * normal
+                )
+            if wall.condition == "Temperature":
+                ghost[2] = 2.0 * wall.value - cell_values[owner, 2]
+            else:
+                viscosity = float(_dynamic_viscosity(temperature[owner : owner + 1], settings)[0])
+                conductivity = (
+                    viscosity
+                    * settings.gamma
+                    * settings.gas_constant
+                    / ((settings.gamma - 1.0) * settings.prandtl_number)
+                )
+                normal_distance = float(np.dot(offset, normal))
+                ghost[2] += (
+                    2.0 * normal_distance * wall.value / conductivity
+                )
+        elif kind == "Symmetry":
+            velocity = cell_values[owner, :2]
+            ghost[:2] -= 2.0 * float(np.dot(velocity, normal)) * normal
+        elif int(face_id) in inlet_values:
+            ghost = 2.0 * inlet_values[int(face_id)] - ghost
+        boundary_sources.append(owner)
+        boundary_neighbours.append(owner)
+        boundary_dx.append(ghost_offset[0])
+        boundary_dy.append(ghost_offset[1])
+        boundary_differences.append(ghost - cell_values[owner])
+
+    if boundary_sources:
+        sources.append(np.asarray(boundary_sources, dtype=int))
+        neighbours.append(np.asarray(boundary_neighbours, dtype=int))
+        dx_values.append(np.asarray(boundary_dx, dtype=float))
+        dy_values.append(np.asarray(boundary_dy, dtype=float))
+        differences = np.vstack((differences[0], np.asarray(boundary_differences)))
+        source_ids = np.concatenate(sources)
+        dx = np.concatenate(dx_values)
+        dy = np.concatenate(dy_values)
+    else:
+        source_ids = sources[0]
+        dx = dx_values[0]
+        dy = dy_values[0]
+        differences = differences[0]
+
+    gradients = np.zeros((len(primitive), 3, 2), dtype=float)
+    if len(source_ids):
+        weights = 1.0 / np.maximum(dx * dx + dy * dy, 1e-300)
+        xx = np.zeros(len(primitive))
+        xy = np.zeros(len(primitive))
+        yy = np.zeros(len(primitive))
+        rhs_x = np.zeros((len(primitive), 3))
+        rhs_y = np.zeros((len(primitive), 3))
+        np.add.at(xx, source_ids, weights * dx * dx)
+        np.add.at(xy, source_ids, weights * dx * dy)
+        np.add.at(yy, source_ids, weights * dy * dy)
+        np.add.at(rhs_x, source_ids, (weights * dx)[:, None] * differences)
+        np.add.at(rhs_y, source_ids, (weights * dy)[:, None] * differences)
+        determinant = xx * yy - xy * xy
+        valid = determinant > 1e-14 * np.maximum(xx * yy, 1e-300)
+        gradients[valid, :, 0] = (
+            rhs_x[valid] * yy[valid, None] - rhs_y[valid] * xy[valid, None]
+        ) / determinant[valid, None]
+        gradients[valid, :, 1] = (
+            rhs_y[valid] * xx[valid, None] - rhs_x[valid] * xy[valid, None]
+        ) / determinant[valid, None]
+    return gradients
+
+
+def _viscous_flux(
+    gradients: np.ndarray,
+    velocities: np.ndarray,
+    viscosity: np.ndarray,
+    conductivity: np.ndarray,
+    normals: np.ndarray,
+) -> np.ndarray:
+    du_dx, du_dy = gradients[:, 0, 0], gradients[:, 0, 1]
+    dv_dx, dv_dy = gradients[:, 1, 0], gradients[:, 1, 1]
+    divergence = du_dx + dv_dy
+    tau_xx = viscosity * (2.0 * du_dx - (2.0 / 3.0) * divergence)
+    tau_yy = viscosity * (2.0 * dv_dy - (2.0 / 3.0) * divergence)
+    tau_xy = viscosity * (du_dy + dv_dx)
+    traction_x = tau_xx * normals[:, 0] + tau_xy * normals[:, 1]
+    traction_y = tau_xy * normals[:, 0] + tau_yy * normals[:, 1]
+    heat_flux = conductivity * np.sum(gradients[:, 2, :] * normals, axis=1)
+    return np.column_stack(
+        (
+            np.zeros(len(normals)),
+            traction_x,
+            traction_y,
+            velocities[:, 0] * traction_x
+            + velocities[:, 1] * traction_y
+            + heat_flux,
+        )
+    )
+
+
+def _viscous_residual(
+    primitive: np.ndarray,
+    geometry: _Geometry,
+    settings: NumericalSettings,
+) -> np.ndarray:
+    temperature = primitive[:, 3] / (
+        primitive[:, 0] * settings.gas_constant
+    )
+    cell_values = np.column_stack((primitive[:, 1:3], temperature))
+    viscosity = _dynamic_viscosity(temperature, settings)
+    conductivity = (
+        viscosity
+        * settings.gamma
+        * settings.gas_constant
+        / ((settings.gamma - 1.0) * settings.prandtl_number)
+    )
+    gradients = _viscous_gradients(primitive, geometry, settings)
+    derivative = np.zeros((len(primitive), 4), dtype=float)
+
+    def add_face_flux(
+        faces: np.ndarray,
+        owners: np.ndarray,
+        neighbours: np.ndarray,
+        normal: np.ndarray,
+        face_gradients: np.ndarray,
+        face_velocity: np.ndarray,
+        face_viscosity: np.ndarray,
+        face_conductivity: np.ndarray,
+    ) -> None:
+        flux = _viscous_flux(
+            face_gradients,
+            face_velocity,
+            face_viscosity,
+            face_conductivity,
+            normal,
+        )
+        integrated = flux * geometry.face_lengths[faces, None]
+        np.add.at(derivative, owners, integrated / geometry.areas[owners, None])
+        np.add.at(
+            derivative, neighbours, -integrated / geometry.areas[neighbours, None]
+        )
+
+    faces = geometry.interior_faces
+    if len(faces):
+        owners, neighbours = geometry.owners[faces], geometry.neighbours[faces]
+        face_gradients = 0.5 * (gradients[owners] + gradients[neighbours])
+        face_velocity = 0.5 * (primitive[owners, 1:3] + primitive[neighbours, 1:3])
+        face_viscosity = 0.5 * (viscosity[owners] + viscosity[neighbours])
+        face_conductivity = 0.5 * (
+            conductivity[owners] + conductivity[neighbours]
+        )
+        add_face_flux(
+            faces,
+            owners,
+            neighbours,
+            geometry.face_normals[faces],
+            face_gradients,
+            face_velocity,
+            face_viscosity,
+            face_conductivity,
+        )
+    faces_a, faces_b = geometry.periodic_faces_a, geometry.periodic_faces_b
+    if len(faces_a):
+        owners_a, owners_b = geometry.owners[faces_a], geometry.owners[faces_b]
+        face_gradients = 0.5 * (gradients[owners_a] + gradients[owners_b])
+        face_velocity = 0.5 * (
+            primitive[owners_a, 1:3] + primitive[owners_b, 1:3]
+        )
+        face_viscosity = 0.5 * (viscosity[owners_a] + viscosity[owners_b])
+        face_conductivity = 0.5 * (
+            conductivity[owners_a] + conductivity[owners_b]
+        )
+        flux = _viscous_flux(
+            face_gradients,
+            face_velocity,
+            face_viscosity,
+            face_conductivity,
+            geometry.face_normals[faces_a],
+        )
+        integrated = flux * geometry.face_lengths[faces_a, None]
+        np.add.at(
+            derivative, owners_a, integrated / geometry.areas[owners_a, None]
+        )
+        np.add.at(
+            derivative, owners_b, -integrated / geometry.areas[owners_b, None]
+        )
+
+    wall_by_face = {
+        int(face_id): boundary
+        for boundary in geometry.wall_thermal_boundaries
+        for face_id in boundary.faces
+    }
+    inlet_states = _viscous_inlet_states(primitive, geometry, settings)
+    for face_id in geometry.diffusive_boundary_faces:
+        owner = int(geometry.owners[face_id])
+        normal = geometry.face_normals[face_id]
+        offset = geometry.face_centers[face_id] - geometry.centers[owner]
+        normal_distance = float(np.dot(offset, normal))
+        if normal_distance <= 1e-14:
+            raise SolverError("Boundary face has invalid cell-center distance.")
+        kind = geometry.patch_kinds[int(geometry.patch_ids[face_id])]
+        face_gradient = gradients[owner].copy()
+        boundary_values = np.array(
+            (primitive[owner, 1], primitive[owner, 2], temperature[owner])
+        )
+        if kind == "Wall":
+            boundary = wall_by_face[int(face_id)]
+            if boundary.mechanical_condition == "No-slip":
+                for component in (0, 1):
+                    normal_derivative = (
+                        -boundary_values[component]
+                        - float(
+                            np.dot(
+                                face_gradient[component],
+                                offset - normal_distance * normal,
+                            )
+                        )
+                    ) / normal_distance
+                    face_gradient[component] += (
+                        normal_derivative
+                        - float(np.dot(face_gradient[component], normal))
+                    ) * normal
+                    boundary_values[component] = 0.0
+            else:
+                tangential_offset = offset - normal_distance * normal
+                normal_velocity = float(np.dot(boundary_values[:2], normal))
+                boundary_values[:2] += face_gradient[:2] @ offset
+                boundary_values[:2] -= (
+                    float(np.dot(boundary_values[:2], normal)) * normal
+                )
+                gradient_normal_velocity = (
+                    normal[0] * face_gradient[0]
+                    + normal[1] * face_gradient[1]
+                )
+                normal_derivative = -(
+                    normal_velocity
+                    + float(np.dot(gradient_normal_velocity, tangential_offset))
+                ) / normal_distance
+                desired_gradient = np.outer(
+                    normal_derivative * normal, normal
+                )
+                velocity_gradient = face_gradient[:2]
+                velocity_gradient += desired_gradient - (
+                    velocity_gradient @ normal
+                )[:, None] * normal
+            if boundary.condition == "Temperature":
+                normal_derivative = (
+                    boundary.value - boundary_values[2]
+                    - float(np.dot(face_gradient[2], offset - normal_distance * normal))
+                ) / normal_distance
+                boundary_values[2] = boundary.value
+            else:
+                normal_derivative = boundary.value / conductivity[owner]
+                boundary_values[2] += float(np.dot(face_gradient[2], offset))
+            face_gradient[2] += (
+                normal_derivative - float(np.dot(face_gradient[2], normal))
+            ) * normal
+        elif kind == "Symmetry":
+            normal_velocity = float(np.dot(boundary_values[:2], normal))
+            derivative_velocity = -normal_velocity / normal_distance * normal
+            for component in (0, 1):
+                face_gradient[component] += (
+                    derivative_velocity[component]
+                    - float(np.dot(face_gradient[component], normal))
+                ) * normal
+            face_gradient[2] -= float(np.dot(face_gradient[2], normal)) * normal
+            boundary_values[:2] -= normal_velocity * normal
+        else:
+            state = inlet_states.get(int(face_id))
+            if state is not None:
+                boundary_values = np.array(
+                    (
+                        state[1],
+                        state[2],
+                        state[3] / (state[0] * settings.gas_constant),
+                    )
+                )
+                for component in range(3):
+                    normal_derivative = (
+                        boundary_values[component]
+                        - cell_values[owner, component]
+                        - float(
+                            np.dot(
+                                face_gradient[component],
+                                offset - normal_distance * normal,
+                            )
+                        )
+                    ) / normal_distance
+                    face_gradient[component] += (
+                        normal_derivative
+                        - float(np.dot(face_gradient[component], normal))
+                    ) * normal
+            else:
+                face_gradient -= np.outer(face_gradient @ normal, normal)
+                boundary_values += face_gradient @ offset
+
+        face_temperature = boundary_values[2]
+        face_mu = float(_dynamic_viscosity(np.array([face_temperature]), settings)[0])
+        face_k = (
+            face_mu
+            * settings.gamma
+            * settings.gas_constant
+            / ((settings.gamma - 1.0) * settings.prandtl_number)
+        )
+        flux = _viscous_flux(
+            face_gradient[None, :, :],
+            boundary_values[None, :2],
+            np.array([face_mu]),
+            np.array([face_k]),
+            normal[None, :],
+        )[0]
+        if kind == "Wall" and wall_by_face[int(face_id)].condition == "Heat Flux":
+            flux[3] = wall_by_face[int(face_id)].value
+        derivative[owner] += (
+            flux * geometry.face_lengths[face_id] / geometry.areas[owner]
+        )
     return derivative
 
 
 def _stable_time_step(
     primitive: np.ndarray,
     geometry: _Geometry,
-    gamma: float,
-    cfl: float,
-    gas_constant: float,
+    settings: NumericalSettings,
 ) -> float:
+    gamma = settings.gamma
     normal_velocity = np.sum(
         primitive[geometry.owners, 1:3] * geometry.face_normals, axis=1
     )
@@ -1093,7 +1589,7 @@ def _stable_time_step(
                 geometry.face_normals[faces],
                 boundary,
                 gamma,
-                gas_constant,
+                settings.gas_constant,
             )
         )
     for boundary in geometry.mass_flow_inlets:
@@ -1107,7 +1603,7 @@ def _stable_time_step(
                 geometry.face_lengths[faces],
                 boundary,
                 gamma,
-                gas_constant,
+                settings.gas_constant,
             )
         )
     for boundary in geometry.mass_flow_outlets:
@@ -1175,7 +1671,88 @@ def _stable_time_step(
             neighbours,
             neighbour_radius * geometry.face_lengths[internal],
         )
-    return float(np.min(cfl * geometry.areas / spectral_sum))
+    if settings.viscosity_model != "Inviscid":
+        temperature = primitive[:, 3] / (
+            primitive[:, 0] * settings.gas_constant
+        )
+        viscosity = _dynamic_viscosity(temperature, settings)
+        effective_diffusivity = np.maximum(
+            (4.0 / 3.0) * viscosity / primitive[:, 0],
+            viscosity / (primitive[:, 0] * settings.prandtl_number),
+        )
+        diffusion_sum = np.zeros(len(primitive), dtype=float)
+        if len(internal):
+            owners = geometry.owners[internal]
+            neighbours = geometry.neighbours[internal]
+            distances = np.abs(
+                np.sum(
+                    (geometry.centers[neighbours] - geometry.centers[owners])
+                    * geometry.face_normals[internal],
+                    axis=1,
+                )
+            )
+            face_diffusivity = np.maximum(
+                effective_diffusivity[owners], effective_diffusivity[neighbours]
+            )
+            contribution = (
+                face_diffusivity
+                * geometry.face_lengths[internal]
+                / np.maximum(distances, 1e-14)
+            )
+            np.add.at(diffusion_sum, owners, contribution)
+            np.add.at(diffusion_sum, neighbours, contribution)
+        periodic_a, periodic_b = (
+            geometry.periodic_faces_a,
+            geometry.periodic_faces_b,
+        )
+        if len(periodic_a):
+            owners_a = geometry.owners[periodic_a]
+            owners_b = geometry.owners[periodic_b]
+            normal_a = geometry.face_normals[periodic_a]
+            distance = np.abs(
+                np.sum(
+                    (geometry.face_centers[periodic_a] - geometry.centers[owners_a])
+                    * normal_a,
+                    axis=1,
+                )
+            ) + np.abs(
+                np.sum(
+                    (
+                        geometry.face_centers[periodic_b]
+                        - geometry.centers[owners_b]
+                    )
+                    * geometry.face_normals[periodic_b],
+                    axis=1,
+                )
+            )
+            face_diffusivity = np.maximum(
+                effective_diffusivity[owners_a],
+                effective_diffusivity[owners_b],
+            )
+            contribution = (
+                face_diffusivity
+                * geometry.face_lengths[periodic_a]
+                / np.maximum(distance, 1e-14)
+            )
+            np.add.at(diffusion_sum, owners_a, contribution)
+            np.add.at(diffusion_sum, owners_b, contribution)
+        for face_id in geometry.diffusive_boundary_faces:
+            owner = geometry.owners[face_id]
+            distance = abs(
+                float(
+                    np.dot(
+                        geometry.face_centers[face_id] - geometry.centers[owner],
+                        geometry.face_normals[face_id],
+                    )
+                )
+            )
+            diffusion_sum[owner] += (
+                effective_diffusivity[owner]
+                * geometry.face_lengths[face_id]
+                / max(distance, 1e-14)
+            )
+        spectral_sum += 2.0 * diffusion_sum
+    return float(np.min(settings.cfl * geometry.areas / spectral_sum))
 
 
 def _sound_speed(primitive: np.ndarray, gamma: float) -> np.ndarray:

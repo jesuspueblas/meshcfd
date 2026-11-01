@@ -49,6 +49,8 @@ class BoundaryCondition:
     patch_name: str
     kind: str = "Wall"
     values: dict[str, float] = field(default_factory=dict)
+    thermal_condition: str = "Temperature"
+    mechanical_condition: str = "No-slip"
 
 
 @dataclass(frozen=True)
@@ -71,6 +73,14 @@ class NumericalSettings:
     residual_tolerance: float = 1e-6
     gamma: float = 1.4
     gas_constant: float = 287.05
+    viscosity_model: str = "Inviscid"
+    dynamic_viscosity: float = 1.8e-5
+    sutherland_reference_viscosity: float = 1.716e-5
+    sutherland_reference_temperature: float = 273.15
+    sutherland_temperature: float = 110.4
+    prandtl_number: float = 0.72
+    acceleration_x: float = 0.0
+    acceleration_y: float = 0.0
 
 
 @dataclass
@@ -145,6 +155,16 @@ class Case:
                     dict(previous[patch.name].values)
                     if patch.name in previous
                     else {}
+                ),
+                mechanical_condition=(
+                    previous[patch.name].mechanical_condition
+                    if patch.name in previous
+                    else "No-slip"
+                ),
+                thermal_condition=(
+                    previous[patch.name].thermal_condition
+                    if patch.name in previous
+                    else "Temperature"
                 ),
             )
             for patch in mesh.patches

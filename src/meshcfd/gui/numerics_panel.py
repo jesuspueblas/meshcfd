@@ -57,12 +57,51 @@ class NumericsPanel(QWidget):
         )
         self.gamma_spin = self._double_spin(1.0001, 2.0, 1.4, 4)
         self.gas_constant_spin = self._double_spin(1e-6, 1e9, 287.05, 4)
+        self.viscosity_model_combo = self._combo(
+            ("Inviscid", "Constant", "Sutherland")
+        )
+        self.dynamic_viscosity_spin = self._double_spin(1e-12, 1e6, 1.8e-5, 10)
+        self.sutherland_reference_viscosity_spin = self._double_spin(
+            1e-12, 1e6, 1.716e-5, 10
+        )
+        self.sutherland_reference_temperature_spin = self._double_spin(
+            1e-6, 1e9, 273.15, 4
+        )
+        self.sutherland_temperature_spin = self._double_spin(1e-6, 1e9, 110.4, 4)
+        self.prandtl_number_spin = self._double_spin(1e-6, 1e6, 0.72, 5)
+        self.acceleration_x_spin = self._double_spin(-1e12, 1e12, 0.0, 6)
+        self.acceleration_y_spin = self._double_spin(-1e12, 1e12, 0.0, 6)
+        self.viscosity_model_combo.setToolTip(
+            "Inviscid disables molecular diffusion. Sutherland uses air reference "
+            "values and temperature in kelvin."
+        )
+        self.dynamic_viscosity_spin.setToolTip("Constant dynamic viscosity (Pa·s).")
+        self.sutherland_reference_viscosity_spin.setToolTip(
+            "Dynamic viscosity at the reference temperature (Pa·s)."
+        )
+        self.sutherland_reference_temperature_spin.setToolTip(
+            "Reference temperature (K)."
+        )
+        self.sutherland_temperature_spin.setToolTip("Sutherland temperature (K).")
+        self.prandtl_number_spin.setToolTip(
+            "Prandtl number used to compute thermal conductivity k = μ cp / Pr."
+        )
+        self.acceleration_x_spin.setToolTip("Constant volumetric acceleration X (m/s²).")
+        self.acceleration_y_spin.setToolTip("Constant volumetric acceleration Y (m/s²).")
         form.addRow("CFL number:", self.cfl_spin)
         form.addRow("Maximum time steps:", self.iterations_spin)
         form.addRow("End time:", self.end_time_spin)
         form.addRow("Residual tolerance:", self.residual_spin)
         form.addRow("Specific heat ratio:", self.gamma_spin)
         form.addRow("Gas constant:", self.gas_constant_spin)
+        form.addRow("Viscosity model:", self.viscosity_model_combo)
+        form.addRow("Mu (Pa s):", self.dynamic_viscosity_spin)
+        form.addRow("Mu ref (Pa s):", self.sutherland_reference_viscosity_spin)
+        form.addRow("T ref (K):", self.sutherland_reference_temperature_spin)
+        form.addRow("Sutherland S (K):", self.sutherland_temperature_spin)
+        form.addRow("Prandtl:", self.prandtl_number_spin)
+        form.addRow("Accel. X (m/s^2):", self.acceleration_x_spin)
+        form.addRow("Accel. Y (m/s^2):", self.acceleration_y_spin)
 
         self.live_solution_checkbox = QCheckBox("Update during run", self)
         self.live_solution_checkbox.setToolTip(
@@ -73,6 +112,9 @@ class NumericsPanel(QWidget):
 
         self.live_solution_checkbox.toggled.connect(
             self.live_solution_changed.emit
+        )
+        self.viscosity_model_combo.currentTextChanged.connect(
+            self._update_viscosity_controls
         )
         self._case = Case()
         self._controls = (
@@ -86,6 +128,14 @@ class NumericsPanel(QWidget):
             self.residual_spin,
             self.gamma_spin,
             self.gas_constant_spin,
+            self.viscosity_model_combo,
+            self.dynamic_viscosity_spin,
+            self.sutherland_reference_viscosity_spin,
+            self.sutherland_reference_temperature_spin,
+            self.sutherland_temperature_spin,
+            self.prandtl_number_spin,
+            self.acceleration_x_spin,
+            self.acceleration_y_spin,
         )
         for combo in (
             self.reconstruction_combo,
@@ -101,9 +151,18 @@ class NumericsPanel(QWidget):
             self.residual_spin,
             self.gamma_spin,
             self.gas_constant_spin,
+            self.dynamic_viscosity_spin,
+            self.sutherland_reference_viscosity_spin,
+            self.sutherland_reference_temperature_spin,
+            self.sutherland_temperature_spin,
+            self.prandtl_number_spin,
+            self.acceleration_x_spin,
+            self.acceleration_y_spin,
         ):
             control.valueChanged.connect(self._sync_case)
+        self.viscosity_model_combo.currentTextChanged.connect(self._sync_case)
         self.set_case(self._case)
+        self._update_viscosity_controls()
 
     def _combo(self, values: tuple[str, ...]) -> QComboBox:
         combo = QComboBox(self)
@@ -134,8 +193,21 @@ class NumericsPanel(QWidget):
         self.residual_spin.setValue(settings.residual_tolerance)
         self.gamma_spin.setValue(settings.gamma)
         self.gas_constant_spin.setValue(settings.gas_constant)
+        self.viscosity_model_combo.setCurrentText(settings.viscosity_model)
+        self.dynamic_viscosity_spin.setValue(settings.dynamic_viscosity)
+        self.sutherland_reference_viscosity_spin.setValue(
+            settings.sutherland_reference_viscosity
+        )
+        self.sutherland_reference_temperature_spin.setValue(
+            settings.sutherland_reference_temperature
+        )
+        self.sutherland_temperature_spin.setValue(settings.sutherland_temperature)
+        self.prandtl_number_spin.setValue(settings.prandtl_number)
+        self.acceleration_x_spin.setValue(settings.acceleration_x)
+        self.acceleration_y_spin.setValue(settings.acceleration_y)
         for control in self._controls:
             control.blockSignals(False)
+        self._update_viscosity_controls()
 
     def _sync_case(self, *_args) -> None:
         settings = self._case.numerics
@@ -149,4 +221,29 @@ class NumericsPanel(QWidget):
         settings.residual_tolerance = self.residual_spin.value()
         settings.gamma = self.gamma_spin.value()
         settings.gas_constant = self.gas_constant_spin.value()
+        settings.viscosity_model = self.viscosity_model_combo.currentText()
+        settings.dynamic_viscosity = self.dynamic_viscosity_spin.value()
+        settings.sutherland_reference_viscosity = (
+            self.sutherland_reference_viscosity_spin.value()
+        )
+        settings.sutherland_reference_temperature = (
+            self.sutherland_reference_temperature_spin.value()
+        )
+        settings.sutherland_temperature = self.sutherland_temperature_spin.value()
+        settings.prandtl_number = self.prandtl_number_spin.value()
+        settings.acceleration_x = self.acceleration_x_spin.value()
+        settings.acceleration_y = self.acceleration_y_spin.value()
         self.changed.emit()
+
+    def _update_viscosity_controls(self, *_args) -> None:
+        model = self.viscosity_model_combo.currentText()
+        for control, visible in (
+            (self.dynamic_viscosity_spin, model == "Constant"),
+            (self.sutherland_reference_viscosity_spin, model == "Sutherland"),
+            (self.sutherland_reference_temperature_spin, model == "Sutherland"),
+            (self.sutherland_temperature_spin, model == "Sutherland"),
+        ):
+            control.setVisible(visible)
+            label = self.layout().labelForField(control)
+            if label is not None:
+                label.setVisible(visible)

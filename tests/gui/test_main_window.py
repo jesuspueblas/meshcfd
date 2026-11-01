@@ -63,9 +63,10 @@ def test_output_dock_layout_preserves_canvas_width(qtbot):
     assert window.numerics_scroll.horizontalScrollBar().maximum() == 0
 
 
-def test_boundary_and_numerical_controls_update_case(qtbot):
+def test_boundary_and_numerical_controls_update_case(qtbot, monkeypatch):
     window = MainWindow()
     qtbot.addWidget(window)
+    monkeypatch.setattr(window, "_confirm_discard_changes", lambda: True)
     case = Case()
     case.set_mesh(make_mesh())
     window._set_case(case, None)
@@ -89,6 +90,63 @@ def test_boundary_and_numerical_controls_update_case(qtbot):
     window.boundary_panel.patch_list.setCurrentRow(2)
     assert window.canvas.transform() == before_select
     assert window.canvas.selected_patch_id == 2
+
+
+def test_viscous_and_acceleration_controls_update_case(qtbot, monkeypatch):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    monkeypatch.setattr(window, "_confirm_discard_changes", lambda: True)
+    case = Case()
+    case.numerics.viscosity_model = "Sutherland"
+    case.numerics.sutherland_reference_viscosity = 1.7e-5
+    case.numerics.prandtl_number = 0.73
+    window._set_case(case, None)
+
+    panel = window.numerics_panel
+    assert panel.sutherland_reference_viscosity_spin.value() == 1.7e-5
+    assert panel.prandtl_number_spin.value() == 0.73
+    panel.sutherland_reference_viscosity_spin.setValue(1.8e-5)
+    panel.prandtl_number_spin.setValue(0.74)
+    panel.acceleration_y_spin.setValue(-9.81)
+
+    assert window.case.numerics.viscosity_model == "Sutherland"
+    assert window.case.numerics.sutherland_reference_viscosity == 1.8e-5
+    assert window.case.numerics.prandtl_number == 0.74
+    assert window.case.numerics.acceleration_y == -9.81
+    assert not panel.sutherland_temperature_spin.isHidden()
+    assert panel.dynamic_viscosity_spin.isHidden()
+    window._dirty = False
+
+
+def test_wall_thermal_condition_selects_temperature_or_heat_flux(
+    qtbot, monkeypatch
+):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    monkeypatch.setattr(window, "_confirm_discard_changes", lambda: True)
+    case = Case()
+    case.set_mesh(make_mesh())
+    window._set_case(case, None)
+
+    panel = window.boundary_panel
+    panel.patch_list.setCurrentRow(0)
+    assert panel.wall_mechanical_combo.currentText() == "No-slip"
+    panel.wall_mechanical_combo.setCurrentText("Slip")
+    assert window.case.boundary_conditions[0].mechanical_condition == "Slip"
+    assert panel.wall_thermal_combo.currentText() == "Temperature"
+    panel.wall_thermal_combo.setCurrentText("Heat Flux")
+
+    assert window.case.boundary_conditions[0].mechanical_condition == "Slip"
+    assert window.case.boundary_conditions[0].thermal_condition == "Heat Flux"
+    assert set(panel.value_controls) == {"heat_flux"}
+    assert "positive from the wall into" in panel.value_controls["heat_flux"].toolTip()
+    panel.value_controls["heat_flux"].setValue(120.0)
+    panel.value_controls["heat_flux"].editingFinished.emit()
+    assert window.case.boundary_conditions[0].values["heat_flux"] == 120.0
+    panel.wall_thermal_combo.setCurrentText("Temperature")
+    assert set(panel.value_controls) == {"temperature"}
+    assert panel.wall_mechanical_combo.currentText() == "Slip"
+    window._dirty = False
 
 
 def test_muscl_parabolic_reconstruction_is_available(qtbot):

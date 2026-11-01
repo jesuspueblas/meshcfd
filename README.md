@@ -11,7 +11,8 @@ The current version provides:
 - Per-patch boundary-condition setup.
 - Translational periodic boundaries, with automatic patch compatibility checks
   and pitch detection along the x or y axis.
-- Transient finite-volume integration of the 2D ideal-gas Euler equations,
+- Transient finite-volume integration of the 2D compressible ideal-gas
+  equations,
   with Rusanov, HLLC, and Roe fluxes; explicit Euler, RK2, and RK3; and
   first-order, limited MUSCL-linear, and limited quadratic MUSCL-parabolic
   reconstruction.
@@ -24,6 +25,10 @@ The current version provides:
   clamping outside the selected range, and optional smooth coloring.
 - Initial numerical controls for MUSCL reconstruction, limiters, fluxes, and
   time integration.
+- Optional laminar viscous stresses and Fourier heat conduction, using
+  constant dynamic viscosity or Sutherland's law and conductivity derived from
+  the Prandtl number. Constant body acceleration is configurable in both
+  coordinate directions.
 - New, open, and save case configuration.
 - Persistence of the final cell-centered solution in the case file, so a saved
   run can be reopened and visualized without running the solver again.
@@ -57,7 +62,7 @@ field values and positive limits. Enable the color-bar icon to display a
 floating legend over the mesh; drag the legend itself to move it, use its
 bottom-right grip to resize it, and select horizontal or vertical orientation.
 
-The transient solver supports periodic, inviscid slip-wall, symmetry,
+The transient solver supports periodic, wall, symmetry,
 velocity-inlet, pressure-inlet, pressure-outlet, mass-flow-inlet,
 mass-flow-outlet, and far-field boundaries. A velocity inlet prescribes
 density, velocity components, and temperature; inlet pressure is calculated
@@ -80,6 +85,19 @@ the local stencil range; cells without a full-rank stencil use the linear
 reconstruction. Runs stop at the configured End time or maximum time-step
 count; the residual is reported for monitoring and does not terminate an
 unsteady run.
+
+Viscous terms are disabled by default to preserve inviscid Euler behavior.
+Select Constant or Sutherland viscosity in Numerical Setup to add the
+Newtonian stress tensor (Stokes hypothesis) and Fourier heat conduction.
+Sutherland defaults are for air: μref = 1.716e-5 Pa·s at Tref = 273.15 K and
+S = 110.4 K. Thermal conductivity is k = μ cp / Pr, with Pr = 0.72 by
+default. Each wall patch independently selects Slip or No-slip and either a
+fixed wall temperature (K) or prescribed heat flux (W/m²); positive heat flux
+enters the fluid. No-slip applies when viscosity is enabled; inviscid walls
+remain slip. Symmetry boundaries remain slip and adiabatic. Acceleration
+components are constant throughout the domain in m/s² and contribute both
+ρf to momentum and ρf·u to total energy. Diffusive explicit stability limits
+are included in the solver time step.
 
 ### Isentropic Euler vortex test
 

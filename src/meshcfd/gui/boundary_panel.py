@@ -27,6 +27,7 @@ from meshcfd.core.periodic import detect_periodic_pair
 
 BOUNDARY_FIELDS = {
     "Wall": (("temperature", "Wall temperature", 300.0),),
+    "Wall Heat Flux": (("heat_flux", "Wall heat flux into fluid (W/m²)", 0.0),),
     "Velocity Inlet": (
         ("density", "Density", 1.225),
         ("velocity_x", "Velocity X", 0.0),
@@ -79,6 +80,8 @@ class BoundaryPanel(QWidget):
         self.kind_combo.addItems(BOUNDARY_TYPES)
         self.form.addRow("Boundary type:", self.kind_combo)
         self.value_controls: dict[str, QDoubleSpinBox] = {}
+        self.wall_mechanical_combo: QComboBox | None = None
+        self.wall_thermal_combo: QComboBox | None = None
         self.kind_combo.currentTextChanged.connect(self._change_kind)
         layout.addWidget(self.editor)
 
@@ -299,9 +302,50 @@ class BoundaryPanel(QWidget):
             self.form.removeRow(control)
         self.value_controls.clear()
         condition = self._active_condition
+        if (
+            self.wall_mechanical_combo is not None
+            and (condition is None or condition.kind != "Wall")
+        ):
+            self.form.removeRow(self.wall_mechanical_combo)
+            self.wall_mechanical_combo = None
+        if (
+            self.wall_thermal_combo is not None
+            and (condition is None or condition.kind != "Wall")
+        ):
+            self.form.removeRow(self.wall_thermal_combo)
+            self.wall_thermal_combo = None
         if condition is None:
             return
-        for key, label, default in BOUNDARY_FIELDS[condition.kind]:
+        fields = BOUNDARY_FIELDS[condition.kind]
+        if condition.kind == "Wall":
+            if self.wall_mechanical_combo is None:
+                self.wall_mechanical_combo = QComboBox(self.editor)
+                self.wall_mechanical_combo.addItems(("Slip", "No-slip"))
+                self.wall_mechanical_combo.currentTextChanged.connect(
+                    self._set_wall_mechanical_condition
+                )
+                self.form.addRow("Mechanical wall condition:", self.wall_mechanical_combo)
+            self.wall_mechanical_combo.blockSignals(True)
+            self.wall_mechanical_combo.setCurrentText(
+                condition.mechanical_condition
+            )
+            self.wall_mechanical_combo.blockSignals(False)
+            if self.wall_thermal_combo is None:
+                self.wall_thermal_combo = QComboBox(self.editor)
+                self.wall_thermal_combo.addItems(("Temperature", "Heat Flux"))
+                self.wall_thermal_combo.currentTextChanged.connect(
+                    self._set_wall_thermal_condition
+                )
+                self.form.addRow("Thermal wall condition:", self.wall_thermal_combo)
+            self.wall_thermal_combo.blockSignals(True)
+            self.wall_thermal_combo.setCurrentText(condition.thermal_condition)
+            self.wall_thermal_combo.blockSignals(False)
+            fields = (
+                BOUNDARY_FIELDS["Wall"]
+                if condition.thermal_condition == "Temperature"
+                else BOUNDARY_FIELDS["Wall Heat Flux"]
+            )
+        for key, label, default in fields:
             control = QDoubleSpinBox(self.editor)
             minimum = (
                 1e-6
@@ -314,7 +358,12 @@ class BoundaryPanel(QWidget):
             control.setDecimals(6)
             control.setSingleStep(1.0)
             control.setValue(condition.values.get(key, default))
-            if key == "mass_flow":
+            if key == "heat_flux":
+                control.setToolTip(
+                    "Prescribed heat flux in W/m²; positive from the wall into "
+                    "the fluid."
+                )
+            elif key == "mass_flow":
                 control.setToolTip(
                     "Positive flow into the domain at an inlet and out of the "
                     "domain at an outlet; specified per unit depth."
@@ -333,6 +382,19 @@ class BoundaryPanel(QWidget):
             )
             self.form.addRow(f"{label}:", control)
             self.value_controls[key] = control
+
+    def _set_wall_thermal_condition(self, value: str) -> None:
+        if self._active_condition is None:
+            return
+        self._active_condition.thermal_condition = value
+        self._rebuild_value_fields()
+        self.changed.emit()
+
+    def _set_wall_mechanical_condition(self, value: str) -> None:
+        if self._active_condition is None:
+            return
+        self._active_condition.mechanical_condition = value
+        self.changed.emit()
 
     def _set_value(self, key: str, value: float) -> None:
         if self._active_condition is None:

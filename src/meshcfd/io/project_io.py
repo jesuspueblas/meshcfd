@@ -28,13 +28,33 @@ from meshcfd.core.periodic import detect_periodic_pair
 from meshcfd.io.mesh_io import load_mesh, mesh_from_dict, mesh_to_dict
 
 PROJECT_FORMAT = "meshcfd-case"
-PROJECT_VERSION = 6
+PROJECT_VERSION = 8
 
 
 def case_to_dict(
     case: Case, case_path: str | Path | None = None
 ) -> dict[str, Any]:
     end_time = _positive_float(case.numerics.end_time, "End time")
+    for condition in case.boundary_conditions:
+        _mechanical_condition(condition.mechanical_condition)
+        _thermal_condition(condition.thermal_condition)
+    if case.numerics.viscosity_model not in ("Inviscid", "Constant", "Sutherland"):
+        raise ValueError("Unsupported viscosity model.")
+    _positive_float(case.numerics.prandtl_number, "Prandtl number")
+    _positive_float(case.numerics.dynamic_viscosity, "Dynamic viscosity")
+    _positive_float(
+        case.numerics.sutherland_reference_viscosity,
+        "Sutherland reference viscosity",
+    )
+    _positive_float(
+        case.numerics.sutherland_reference_temperature,
+        "Sutherland reference temperature",
+    )
+    _positive_float(
+        case.numerics.sutherland_temperature, "Sutherland temperature"
+    )
+    _finite_float(case.numerics.acceleration_x, "Acceleration X")
+    _finite_float(case.numerics.acceleration_y, "Acceleration Y")
     _validate_periodic_pairs(
         case.mesh, case.boundary_conditions, case.periodic_pairs
     )
@@ -77,6 +97,8 @@ def case_to_dict(
                 "patch_name": condition.patch_name,
                 "kind": condition.kind,
                 "values": dict(condition.values),
+                "mechanical_condition": condition.mechanical_condition,
+                "thermal_condition": condition.thermal_condition,
             }
             for condition in case.boundary_conditions
         ],
@@ -100,6 +122,18 @@ def case_to_dict(
             "residual_tolerance": case.numerics.residual_tolerance,
             "gamma": case.numerics.gamma,
             "gas_constant": case.numerics.gas_constant,
+            "viscosity_model": case.numerics.viscosity_model,
+            "dynamic_viscosity": case.numerics.dynamic_viscosity,
+            "sutherland_reference_viscosity": (
+                case.numerics.sutherland_reference_viscosity
+            ),
+            "sutherland_reference_temperature": (
+                case.numerics.sutherland_reference_temperature
+            ),
+            "sutherland_temperature": case.numerics.sutherland_temperature,
+            "prandtl_number": case.numerics.prandtl_number,
+            "acceleration_x": case.numerics.acceleration_x,
+            "acceleration_y": case.numerics.acceleration_y,
         },
         "initial_conditions": initial_conditions,
         "final_solution": final_solution,
@@ -118,6 +152,8 @@ def case_from_dict(
         3,
         4,
         5,
+        6,
+        7,
         PROJECT_VERSION,
     ):
         raise ValueError(
@@ -186,7 +222,18 @@ def case_from_dict(
                 raise ValueError(f"Boundary value '{key}' must be finite.")
             numeric_values[key] = number
         conditions.append(
-            BoundaryCondition(patch_id, patch_name, kind, numeric_values)
+            BoundaryCondition(
+                patch_id,
+                patch_name,
+                kind,
+                numeric_values,
+                thermal_condition=_thermal_condition(
+                    raw_condition.get("thermal_condition", "Temperature")
+                ),
+                mechanical_condition=_mechanical_condition(
+                    raw_condition.get("mechanical_condition", "No-slip")
+                ),
+            )
         )
         seen_patch_ids.add(patch_id)
         seen_patch_names.add(patch_name)
@@ -221,12 +268,52 @@ def case_from_dict(
             raw_numerics.get("gas_constant", defaults.gas_constant),
             "Gas constant",
         ),
+        viscosity_model=raw_numerics.get(
+            "viscosity_model", defaults.viscosity_model
+        ),
+        dynamic_viscosity=_positive_float(
+            raw_numerics.get("dynamic_viscosity", defaults.dynamic_viscosity),
+            "Dynamic viscosity",
+        ),
+        sutherland_reference_viscosity=_positive_float(
+            raw_numerics.get(
+                "sutherland_reference_viscosity",
+                defaults.sutherland_reference_viscosity,
+            ),
+            "Sutherland reference viscosity",
+        ),
+        sutherland_reference_temperature=_positive_float(
+            raw_numerics.get(
+                "sutherland_reference_temperature",
+                defaults.sutherland_reference_temperature,
+            ),
+            "Sutherland reference temperature",
+        ),
+        sutherland_temperature=_positive_float(
+            raw_numerics.get(
+                "sutherland_temperature", defaults.sutherland_temperature
+            ),
+            "Sutherland temperature",
+        ),
+        prandtl_number=_positive_float(
+            raw_numerics.get("prandtl_number", defaults.prandtl_number),
+            "Prandtl number",
+        ),
+        acceleration_x=_finite_float(
+            raw_numerics.get("acceleration_x", defaults.acceleration_x),
+            "Acceleration X",
+        ),
+        acceleration_y=_finite_float(
+            raw_numerics.get("acceleration_y", defaults.acceleration_y),
+            "Acceleration Y",
+        ),
     )
     for key, choices in (
         ("reconstruction", RECONSTRUCTION_SCHEMES),
         ("limiter", LIMITER_SCHEMES),
         ("flux", FLUX_SCHEMES),
         ("time_integration", TIME_INTEGRATION_SCHEMES),
+        ("viscosity_model", ("Inviscid", "Constant", "Sutherland")),
     ):
         if getattr(settings, key) not in choices:
             raise ValueError(f"Unsupported numerical setting for {key}.")
@@ -533,6 +620,18 @@ def _positive_float(value: Any, description: str) -> float:
     if not math.isfinite(number) or number <= 0.0:
         raise ValueError(f"{description} must be a positive finite number.")
     return number
+
+
+def _thermal_condition(value: Any) -> str:
+    if value not in ("Temperature", "Heat Flux"):
+        raise ValueError("Wall thermal condition must be Temperature or Heat Flux.")
+    return value
+
+
+def _mechanical_condition(value: Any) -> str:
+    if value not in ("Slip", "No-slip"):
+        raise ValueError("Wall mechanical condition must be Slip or No-slip.")
+    return value
 
 
 def _positive_integer(value: Any, description: str) -> int:

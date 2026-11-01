@@ -56,6 +56,13 @@ def test_case_round_trip_keeps_mesh_and_setup(tmp_path):
     case.numerics.reconstruction = "MUSCL parabolic"
     case.numerics.cfl = 0.8
     case.numerics.end_time = 3.5
+    case.numerics.viscosity_model = "Sutherland"
+    case.numerics.sutherland_reference_viscosity = 1.8e-5
+    case.numerics.prandtl_number = 0.74
+    case.numerics.acceleration_y = -9.81
+    case.boundary_conditions[0].thermal_condition = "Heat Flux"
+    case.boundary_conditions[0].mechanical_condition = "Slip"
+    case.boundary_conditions[0].values["heat_flux"] = 250.0
     path = tmp_path / "channel.mcf.json"
 
     save_case(path, case)
@@ -66,6 +73,55 @@ def test_case_round_trip_keeps_mesh_and_setup(tmp_path):
     assert restored.boundary_conditions[1].values["velocity_x"] == 80.0
     assert restored.numerics.reconstruction == "MUSCL parabolic"
     assert restored.numerics.end_time == 3.5
+    assert restored.numerics.viscosity_model == "Sutherland"
+    assert restored.numerics.sutherland_reference_viscosity == 1.8e-5
+    assert restored.numerics.prandtl_number == 0.74
+    assert restored.numerics.acceleration_y == -9.81
+    assert restored.boundary_conditions[0].thermal_condition == "Heat Flux"
+    assert restored.boundary_conditions[0].mechanical_condition == "Slip"
+    assert restored.boundary_conditions[0].values["heat_flux"] == 250.0
+
+
+def test_version_six_case_loads_with_inviscid_defaults():
+    data = case_to_dict(Case(name="legacy"))
+    data["version"] = 6
+    for boundary in data["boundary_conditions"]:
+        boundary.pop("mechanical_condition")
+        boundary.pop("thermal_condition")
+    for key in (
+        "viscosity_model",
+        "dynamic_viscosity",
+        "sutherland_reference_viscosity",
+        "sutherland_reference_temperature",
+        "sutherland_temperature",
+        "prandtl_number",
+        "acceleration_x",
+        "acceleration_y",
+    ):
+        data["numerics"].pop(key)
+
+    restored = case_from_dict(data)
+
+    assert restored.numerics.viscosity_model == "Inviscid"
+    assert restored.numerics.prandtl_number == pytest.approx(0.72)
+    assert restored.numerics.acceleration_x == 0.0
+    assert restored.boundary_conditions == []
+
+
+def test_version_seven_wall_defaults_to_no_slip():
+    case = Case(name="legacy")
+    case.set_mesh(make_mesh())
+    data = case_to_dict(case)
+    data["version"] = 7
+    for boundary in data["boundary_conditions"]:
+        boundary.pop("mechanical_condition")
+
+    restored = case_from_dict(data)
+
+    assert all(
+        boundary.mechanical_condition == "No-slip"
+        for boundary in restored.boundary_conditions
+    )
 
 
 def test_case_round_trip_preserves_new_boundary_condition_values(tmp_path):
@@ -95,6 +151,28 @@ def test_case_round_trip_preserves_new_boundary_condition_values(tmp_path):
     assert case_to_dict(restored) == case_to_dict(case)
 
 
+def test_replacing_mesh_preserves_wall_thermal_condition():
+    case = Case()
+    case.set_mesh(make_mesh())
+    case.boundary_conditions[0].thermal_condition = "Heat Flux"
+    case.boundary_conditions[0].values["heat_flux"] = 200.0
+
+    case.set_mesh(make_mesh())
+
+    assert case.boundary_conditions[0].thermal_condition == "Heat Flux"
+    assert case.boundary_conditions[0].values["heat_flux"] == 200.0
+
+
+def test_replacing_mesh_preserves_wall_mechanical_condition():
+    case = Case()
+    case.set_mesh(make_mesh())
+    case.boundary_conditions[0].mechanical_condition = "Slip"
+
+    case.set_mesh(make_mesh())
+
+    assert case.boundary_conditions[0].mechanical_condition == "Slip"
+
+
 def test_case_saves_relative_mesh_reference_and_reloads_mesh(tmp_path):
     mesh_path = tmp_path / "mesh.json"
     mesh_path.write_text(json.dumps(mesh_to_dict(make_mesh())), encoding="utf-8")
@@ -106,7 +184,7 @@ def test_case_saves_relative_mesh_reference_and_reloads_mesh(tmp_path):
     save_case(case_path, case)
 
     saved_data = json.loads(case_path.read_text(encoding="utf-8"))
-    assert saved_data["version"] == 6
+    assert saved_data["version"] == 8
     assert saved_data["mesh"] == "../mesh.json"
     assert isinstance(saved_data["mesh"], str)
 
@@ -147,7 +225,7 @@ def test_case_round_trip_preserves_final_solution(tmp_path):
     saved_data = json.loads(path.read_text(encoding="utf-8"))
     restored = load_case(path)
 
-    assert saved_data["version"] == 6
+    assert saved_data["version"] == 8
     assert saved_data["final_solution"] == [
         {
             "density": 0.9,
@@ -225,7 +303,7 @@ def test_periodic_pair_detection_and_case_round_trip(tmp_path):
     assert restored.periodic_pairs == case.periodic_pairs
     assert restored.boundary_conditions[1].kind == "Periodic"
     assert restored.boundary_conditions[3].kind == "Periodic"
-    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 6
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 8
 
 
 def test_version_four_periodic_case_defaults_end_time():
