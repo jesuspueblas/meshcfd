@@ -10,6 +10,8 @@ BOUNDARY_TYPES = (
     "Velocity Inlet",
     "Pressure Inlet",
     "Pressure Outlet",
+    "Mass Flow Inlet",
+    "Mass Flow Outlet",
     "Symmetry",
     "Far Field",
     "Periodic",

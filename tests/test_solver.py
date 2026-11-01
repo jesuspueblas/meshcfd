@@ -20,7 +20,10 @@ from meshcfd.core.solver import (
     SolverProgress,
     _build_geometry,
     _far_field_boundary_states,
+    _mass_flow_inlet_boundary_states,
+    _mass_flow_outlet_boundary_states,
     _parabolic_reconstruction,
+    _pressure_inlet_boundary_states,
     solve_case,
 )
 
@@ -325,6 +328,171 @@ def test_velocity_inlet_rejects_non_positive_density():
 
     with pytest.raises(SolverError, match="Density.*must be positive"):
         solve_case(case, (InitialState(),))
+
+
+def test_pressure_inlet_reconstructs_matching_subsonic_flow():
+    case = make_periodic_case()
+    case.periodic_pairs.clear()
+    case.numerics.gas_constant = 1.0
+    for condition in case.boundary_conditions:
+        condition.kind = "Wall"
+    total_temperature = 1.0 + 0.2**2 / (2.0 * 3.5)
+    total_pressure = total_temperature ** (1.4 / 0.4)
+    case.boundary_conditions[3].kind = "Pressure Inlet"
+    case.boundary_conditions[3].values = {
+        "pressure": total_pressure,
+        "temperature": total_temperature,
+        "velocity_x": 1.0,
+        "velocity_y": 0.0,
+    }
+    geometry = _build_geometry(case.mesh, case)
+    interior = np.array(((1.0, 0.2, 0.0, 1.0),))
+    boundary = geometry.pressure_inlets[0]
+
+    states = _pressure_inlet_boundary_states(
+        interior,
+        geometry.face_normals[boundary.faces],
+        boundary,
+        case.numerics.gamma,
+        case.numerics.gas_constant,
+    )
+
+    np.testing.assert_allclose(states, interior, rtol=1e-12, atol=1e-12)
+    with pytest.raises(SolverError, match="supersonic inflow"):
+        _pressure_inlet_boundary_states(
+            np.array(((1.0, 2.0, 0.0, 1.0),)),
+            geometry.face_normals[boundary.faces],
+            boundary,
+            case.numerics.gamma,
+            case.numerics.gas_constant,
+        )
+
+
+def test_mass_flow_inlet_satisfies_integrated_flow_rate():
+    case = make_periodic_case()
+    case.periodic_pairs.clear()
+    case.numerics.gas_constant = 1.0
+    for condition in case.boundary_conditions:
+        condition.kind = "Wall"
+    case.boundary_conditions[3].kind = "Mass Flow Inlet"
+    case.boundary_conditions[3].values = {
+        "mass_flow": 0.25,
+        "temperature": 2.0,
+        "velocity_x": 1.0,
+        "velocity_y": 0.0,
+    }
+    geometry = _build_geometry(case.mesh, case)
+    boundary = geometry.mass_flow_inlets[0]
+    normals = geometry.face_normals[boundary.faces]
+    lengths = geometry.face_lengths[boundary.faces]
+
+    states = _mass_flow_inlet_boundary_states(
+        np.array(((1.0, 0.0, 0.0, 1.0),)),
+        normals,
+        lengths,
+        boundary,
+        case.numerics.gamma,
+        case.numerics.gas_constant,
+    )
+    integrated_flow = np.sum(
+        states[:, 0] * -(states[:, 1:3] * normals).sum(axis=1) * lengths
+    )
+
+    assert integrated_flow == pytest.approx(boundary.mass_flow, rel=1e-12)
+    np.testing.assert_allclose(states[:, 3], 1.0)
+
+
+def test_mass_flow_outlet_preserves_pressure_density_and_tangential_velocity():
+    case = make_periodic_case()
+    case.periodic_pairs.clear()
+    for condition in case.boundary_conditions:
+        condition.kind = "Wall"
+    case.boundary_conditions[1].kind = "Mass Flow Outlet"
+    case.boundary_conditions[1].values = {"mass_flow": 0.6}
+    geometry = _build_geometry(case.mesh, case)
+    boundary = geometry.mass_flow_outlets[0]
+    normals = geometry.face_normals[boundary.faces]
+    lengths = geometry.face_lengths[boundary.faces]
+    interior = np.array(((2.0, 0.4, 0.3, 1.2),))
+
+    states = _mass_flow_outlet_boundary_states(
+        interior, normals, lengths, boundary
+    )
+
+    assert np.sum(states[:, 0] * (states[:, 1:3] * normals).sum(axis=1) * lengths) == pytest.approx(
+        boundary.mass_flow
+    )
+    np.testing.assert_allclose(states[:, (0, 3)], interior[:, (0, 3)])
+    np.testing.assert_allclose(states[:, 2], interior[:, 2])
+
+
+@pytest.mark.parametrize("kind", ("Mass Flow Inlet", "Mass Flow Outlet"))
+def test_mass_flow_boundaries_reject_non_positive_flow_rate(kind):
+    case = make_periodic_case()
+    case.periodic_pairs.clear()
+    for condition in case.boundary_conditions:
+        condition.kind = "Wall"
+    condition = case.boundary_conditions[3 if kind == "Mass Flow Inlet" else 1]
+    condition.kind = kind
+    condition.values = {"mass_flow": 0.0}
+
+    with pytest.raises(SolverError, match="Mass flow.*must be positive"):
+        solve_case(case, (InitialState(),))
+
+
+@pytest.mark.parametrize("kind", ("Pressure Inlet", "Mass Flow Inlet"))
+def test_inlet_boundaries_reject_direction_pointing_out_of_domain(kind):
+    case = make_periodic_case()
+    case.periodic_pairs.clear()
+    for condition in case.boundary_conditions:
+        condition.kind = "Wall"
+    inlet = case.boundary_conditions[3]
+    inlet.kind = kind
+    inlet.values = (
+        {"pressure": 101325.0, "temperature": 288.15}
+        if kind == "Pressure Inlet"
+        else {"mass_flow": 0.2, "temperature": 288.15}
+    )
+    inlet.values.update({"velocity_x": -1.0, "velocity_y": 0.0})
+
+    with pytest.raises(SolverError, match="direction must point into the domain"):
+        solve_case(case, (InitialState(),))
+
+
+@pytest.mark.parametrize("inlet_kind", ("Pressure Inlet", "Mass Flow Inlet"))
+def test_inlet_boundary_types_run_with_mass_flow_outlet(inlet_kind):
+    case = make_periodic_case()
+    case.periodic_pairs.clear()
+    case.numerics.gas_constant = 1.0
+    case.numerics.end_time = 0.01
+    case.numerics.max_iterations = 1
+    for condition in case.boundary_conditions:
+        condition.kind = "Wall"
+        condition.values.clear()
+    inlet = case.boundary_conditions[3]
+    inlet.kind = inlet_kind
+    inlet.values = (
+        {
+            "pressure": (1.0 + 0.2**2 / 7.0) ** 3.5,
+            "temperature": 1.0 + 0.2**2 / 7.0,
+            "velocity_x": 1.0,
+            "velocity_y": 0.0,
+        }
+        if inlet_kind == "Pressure Inlet"
+        else {
+            "mass_flow": 0.2,
+            "temperature": 1.0 + 0.2**2 / 7.0,
+            "velocity_x": 1.0,
+            "velocity_y": 0.0,
+        }
+    )
+    outlet = case.boundary_conditions[1]
+    outlet.kind = "Mass Flow Outlet"
+    outlet.values = {"mass_flow": 0.2}
+
+    result = solve_case(case, (InitialState(1.0, 0.2, 0.0, 1.0),))
+
+    assert result.steps == 1
 
 
 @pytest.mark.parametrize("flux", ("Rusanov", "HLLC", "Roe"))

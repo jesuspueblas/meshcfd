@@ -58,8 +58,15 @@ gui (PyQt5)         io (JSON)
   field and time; the configured end time remains an absolute target.
 
 The solver handles transient inviscid ideal-gas Euler flow with periodic,
-slip-wall, symmetry, velocity-inlet, pressure-outlet, and characteristic
-far-field boundaries. MUSCL parabolic uses a limited quadratic reconstruction
-over a two-ring stencil, falling back to linear reconstruction when the local
-stencil is rank-deficient. Pressure-inlet boundaries are not yet supported and
-produce explicit errors if selected.
+slip-wall, symmetry, velocity-inlet, pressure-inlet, pressure-outlet,
+mass-flow-inlet, mass-flow-outlet, and characteristic far-field boundaries.
+Pressure inlet prescribes total pressure and temperature and uses a
+characteristic isentropic closure for compatible subsonic inflow; unsupported
+supersonic or incompatible states produce explicit errors. Mass-flow rates are
+specified per unit depth (kg/s/m), positive into the domain at inlets and out
+at outlets. Mass-flow inlet additionally specifies total temperature and a
+normalized direction, while mass-flow outlet preserves extrapolated density,
+pressure, and tangential velocity and distributes its required outward rate
+uniformly per face length. MUSCL parabolic uses a limited quadratic
+reconstruction over a two-ring stencil, falling back to linear reconstruction
+when the local stencil is rank-deficient.

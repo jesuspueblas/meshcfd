@@ -53,19 +53,28 @@ floating legend over the mesh; drag the legend itself to move it, use its
 bottom-right grip to resize it, and select horizontal or vertical orientation.
 
 The transient solver supports periodic, inviscid slip-wall, symmetry,
-velocity-inlet, pressure-outlet, and far-field boundaries. A velocity inlet
-prescribes density, velocity components, and temperature; inlet pressure is
-calculated with the ideal-gas law and configured gas constant. A pressure
+velocity-inlet, pressure-inlet, pressure-outlet, mass-flow-inlet,
+mass-flow-outlet, and far-field boundaries. A velocity inlet prescribes
+density, velocity components, and temperature; inlet pressure is calculated
+with the ideal-gas law and configured gas constant. A pressure inlet prescribes
+total pressure and temperature plus a normalized flow-direction vector, and
+uses an isentropic characteristic closure for compatible subsonic inflow;
+supersonic inflow/outflow and incompatible states are rejected. A pressure
 outlet extrapolates density and velocity from the interior and imposes the
-configured static pressure. Far-field boundaries use density, velocity
-components, and pressure with characteristic treatment for subsonic flow and
-the appropriate interior or freestream state for supersonic outflow or inflow.
-Pressure inlet is not implemented and is reported as a solver error. MUSCL
-parabolic fits a quadratic polynomial over the two-ring cell stencil and limits
-face values to the local stencil range; cells without a full-rank stencil use
-the linear reconstruction. Runs stop at the configured End time or maximum
-time-step count; the residual is reported for monitoring and does not terminate
-an unsteady run.
+configured static pressure. Mass-flow rates are specified in kg/s/m, positive
+into the domain for inlets and out of the domain for outlets. A mass-flow inlet
+also prescribes total temperature and flow direction; it extrapolates static
+pressure and solves for a common inlet speed that satisfies the integrated
+rate. A mass-flow outlet extrapolates density, pressure, and tangential
+velocity, then imposes the requested outward mass flux uniformly per face
+length. Far-field boundaries use density, velocity components, and pressure
+with characteristic treatment for subsonic flow and the appropriate interior
+or freestream state for supersonic outflow or inflow. MUSCL parabolic fits a
+quadratic polynomial over the two-ring cell stencil and limits face values to
+the local stencil range; cells without a full-rank stencil use the linear
+reconstruction. Runs stop at the configured End time or maximum time-step
+count; the residual is reported for monitoring and does not terminate an
+unsteady run.
 
 ### Isentropic Euler vortex test
 

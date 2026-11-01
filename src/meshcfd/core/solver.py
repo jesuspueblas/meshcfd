@@ -46,6 +46,31 @@ class SolverResult:
 
 
 @dataclass(frozen=True)
+class _PressureInlet:
+    faces: np.ndarray
+    total_pressure: float
+    total_temperature: float
+    direction: np.ndarray
+    patch_name: str
+
+
+@dataclass(frozen=True)
+class _MassFlowInlet:
+    faces: np.ndarray
+    mass_flow: float
+    total_temperature: float
+    direction: np.ndarray
+    patch_name: str
+
+
+@dataclass(frozen=True)
+class _MassFlowOutlet:
+    faces: np.ndarray
+    mass_flow: float
+    patch_name: str
+
+
+@dataclass(frozen=True)
 class _Geometry:
     centers: np.ndarray
     areas: np.ndarray
@@ -66,6 +91,9 @@ class _Geometry:
     pressure_outlet_pressures: np.ndarray
     far_field_faces: np.ndarray
     far_field_states: np.ndarray
+    pressure_inlets: tuple[_PressureInlet, ...]
+    mass_flow_inlets: tuple[_MassFlowInlet, ...]
+    mass_flow_outlets: tuple[_MassFlowOutlet, ...]
     gradient_sources: np.ndarray
     gradient_neighbours: np.ndarray
     gradient_dx: np.ndarray
@@ -175,7 +203,13 @@ def solve_case(
         try:
             primitive = conservative_to_primitive(conservative, settings.gamma)
             time_step = min(
-                _stable_time_step(primitive, geometry, settings.gamma, settings.cfl),
+                _stable_time_step(
+                    primitive,
+                    geometry,
+                    settings.gamma,
+                    settings.cfl,
+                    settings.gas_constant,
+                ),
                 settings.end_time - time,
             )
             if not math.isfinite(time_step) or time_step <= 0.0:
@@ -183,7 +217,7 @@ def solve_case(
             start = conservative
             derivative = _residual(
                 start, geometry, settings.gamma, settings.flux,
-                settings.reconstruction, settings.limiter,
+                settings.reconstruction, settings.limiter, settings.gas_constant,
             )
             if settings.time_integration == "Explicit Euler":
                 conservative = start + time_step * derivative
@@ -191,7 +225,7 @@ def solve_case(
                 stage_one = start + time_step * derivative
                 derivative_one = _residual(
                     stage_one, geometry, settings.gamma, settings.flux,
-                    settings.reconstruction, settings.limiter,
+                    settings.reconstruction, settings.limiter, settings.gas_constant,
                 )
                 if settings.time_integration == "Explicit RK2":
                     conservative = 0.5 * start + 0.5 * (
@@ -203,7 +237,7 @@ def solve_case(
                     )
                     derivative_two = _residual(
                         stage_two, geometry, settings.gamma, settings.flux,
-                        settings.reconstruction, settings.limiter,
+                        settings.reconstruction, settings.limiter, settings.gas_constant,
                     )
                     conservative = (1.0 / 3.0) * start + (2.0 / 3.0) * (
                         stage_two + time_step * derivative_two
@@ -255,6 +289,7 @@ def solve_case(
             settings.flux,
             settings.reconstruction,
             settings.limiter,
+            settings.gas_constant,
         )
     except ValueError as error:
         raise SolverError(f"Could not evaluate final residual: {error}") from error
@@ -353,7 +388,10 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
             "Wall",
             "Symmetry",
             "Velocity Inlet",
+            "Pressure Inlet",
             "Pressure Outlet",
+            "Mass Flow Inlet",
+            "Mass Flow Outlet",
             "Far Field",
         ):
             raise SolverError(
@@ -389,6 +427,9 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
     pressure_outlet_pressures = []
     far_field_faces = []
     far_field_states = []
+    pressure_inlets = []
+    mass_flow_inlets = []
+    mass_flow_outlets = []
     for patch_id, condition in conditions.items():
         faces = np.asarray(
             [
@@ -431,6 +472,58 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
             )
             pressure_outlet_faces.extend(faces.tolist())
             pressure_outlet_pressures.extend([pressure] * len(faces))
+        elif condition.kind == "Pressure Inlet":
+            total_pressure = _positive_boundary_value(
+                condition.values.get("pressure", 101325.0),
+                f"Total pressure for inlet '{condition.patch_name}'",
+            )
+            total_temperature = _positive_boundary_value(
+                condition.values.get("temperature", 288.15),
+                f"Total temperature for inlet '{condition.patch_name}'",
+            )
+            direction = _boundary_flow_direction(
+                condition.values.get("velocity_x", 1.0),
+                condition.values.get("velocity_y", 0.0),
+                f"Pressure inlet '{condition.patch_name}'",
+            )
+            pressure_inlets.append(
+                _PressureInlet(
+                    faces,
+                    total_pressure,
+                    total_temperature,
+                    direction,
+                    condition.patch_name,
+                )
+            )
+        elif condition.kind == "Mass Flow Inlet":
+            mass_flow = _positive_boundary_value(
+                condition.values.get("mass_flow", 1.0),
+                f"Mass flow for inlet '{condition.patch_name}'",
+            )
+            total_temperature = _positive_boundary_value(
+                condition.values.get("temperature", 288.15),
+                f"Total temperature for inlet '{condition.patch_name}'",
+            )
+            direction = _boundary_flow_direction(
+                condition.values.get("velocity_x", 1.0),
+                condition.values.get("velocity_y", 0.0),
+                f"Mass-flow inlet '{condition.patch_name}'",
+            )
+            mass_flow_inlets.append(
+                _MassFlowInlet(
+                    faces,
+                    mass_flow,
+                    total_temperature,
+                    direction,
+                    condition.patch_name,
+                )
+            )
+        elif condition.kind == "Mass Flow Outlet":
+            mass_flow = _positive_boundary_value(
+                condition.values.get("mass_flow", 1.0),
+                f"Mass flow for outlet '{condition.patch_name}'",
+            )
+            mass_flow_outlets.append(_MassFlowOutlet(faces, mass_flow, condition.patch_name))
         elif condition.kind == "Far Field":
             density = _positive_boundary_value(
                 condition.values.get("density", 1.225),
@@ -522,6 +615,9 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
         ),
         far_field_faces=np.asarray(far_field_faces, dtype=int),
         far_field_states=np.asarray(far_field_states, dtype=float).reshape((-1, 4)),
+        pressure_inlets=tuple(pressure_inlets),
+        mass_flow_inlets=tuple(mass_flow_inlets),
+        mass_flow_outlets=tuple(mass_flow_outlets),
         gradient_sources=np.asarray(gradient_sources, dtype=int),
         gradient_neighbours=np.asarray(gradient_neighbours, dtype=int),
         gradient_dx=np.asarray(gradient_dx, dtype=float),
@@ -780,6 +876,7 @@ def _residual(
     flux_scheme: str,
     reconstruction: str,
     limiter: str,
+    gas_constant: float,
 ) -> np.ndarray:
     primitive = conservative_to_primitive(conservative, gamma)
     curvature = None
@@ -902,13 +999,74 @@ def _residual(
         )
         integrated = flux * geometry.face_lengths[faces, None]
         np.add.at(derivative, owners, -integrated / geometry.areas[owners, None])
+    for boundary in geometry.pressure_inlets:
+        faces = boundary.faces
+        owners = geometry.owners[faces]
+        interior = reconstruct(
+            owners,
+            geometry.face_centers[faces] - geometry.centers[owners],
+        )
+        exterior = _pressure_inlet_boundary_states(
+            interior,
+            geometry.face_normals[faces],
+            boundary,
+            gamma,
+            gas_constant,
+        )
+        flux = numerical_flux(
+            interior, exterior, geometry.face_normals[faces], gamma, flux_scheme
+        )
+        integrated = flux * geometry.face_lengths[faces, None]
+        np.add.at(derivative, owners, -integrated / geometry.areas[owners, None])
+    for boundary in geometry.mass_flow_inlets:
+        faces = boundary.faces
+        owners = geometry.owners[faces]
+        interior = reconstruct(
+            owners,
+            geometry.face_centers[faces] - geometry.centers[owners],
+        )
+        exterior = _mass_flow_inlet_boundary_states(
+            interior,
+            geometry.face_normals[faces],
+            geometry.face_lengths[faces],
+            boundary,
+            gamma,
+            gas_constant,
+        )
+        flux = numerical_flux(
+            interior, exterior, geometry.face_normals[faces], gamma, flux_scheme
+        )
+        integrated = flux * geometry.face_lengths[faces, None]
+        np.add.at(derivative, owners, -integrated / geometry.areas[owners, None])
+    for boundary in geometry.mass_flow_outlets:
+        faces = boundary.faces
+        owners = geometry.owners[faces]
+        interior = reconstruct(
+            owners,
+            geometry.face_centers[faces] - geometry.centers[owners],
+        )
+        exterior = _mass_flow_outlet_boundary_states(
+            interior,
+            geometry.face_normals[faces],
+            geometry.face_lengths[faces],
+            boundary,
+        )
+        flux = numerical_flux(
+            interior, exterior, geometry.face_normals[faces], gamma, flux_scheme
+        )
+        integrated = flux * geometry.face_lengths[faces, None]
+        np.add.at(derivative, owners, -integrated / geometry.areas[owners, None])
     if not np.isfinite(derivative).all():
         raise SolverError("Spatial residual contains non-finite values.")
     return derivative
 
 
 def _stable_time_step(
-    primitive: np.ndarray, geometry: _Geometry, gamma: float, cfl: float
+    primitive: np.ndarray,
+    geometry: _Geometry,
+    gamma: float,
+    cfl: float,
+    gas_constant: float,
 ) -> float:
     normal_velocity = np.sum(
         primitive[geometry.owners, 1:3] * geometry.face_normals, axis=1
@@ -922,6 +1080,50 @@ def _stable_time_step(
             geometry.far_field_faces,
         )
     )
+    existing_boundary_count = len(boundary_faces)
+    additional_faces = []
+    additional_states = []
+    for boundary in geometry.pressure_inlets:
+        faces = boundary.faces
+        owners = geometry.owners[faces]
+        additional_faces.append(faces)
+        additional_states.append(
+            _pressure_inlet_boundary_states(
+                primitive[owners],
+                geometry.face_normals[faces],
+                boundary,
+                gamma,
+                gas_constant,
+            )
+        )
+    for boundary in geometry.mass_flow_inlets:
+        faces = boundary.faces
+        owners = geometry.owners[faces]
+        additional_faces.append(faces)
+        additional_states.append(
+            _mass_flow_inlet_boundary_states(
+                primitive[owners],
+                geometry.face_normals[faces],
+                geometry.face_lengths[faces],
+                boundary,
+                gamma,
+                gas_constant,
+            )
+        )
+    for boundary in geometry.mass_flow_outlets:
+        faces = boundary.faces
+        owners = geometry.owners[faces]
+        additional_faces.append(faces)
+        additional_states.append(
+            _mass_flow_outlet_boundary_states(
+                primitive[owners],
+                geometry.face_normals[faces],
+                geometry.face_lengths[faces],
+                boundary,
+            )
+        )
+    if additional_faces:
+        boundary_faces = np.concatenate((boundary_faces, *additional_faces))
     if len(boundary_faces):
         owners = geometry.owners[boundary_faces]
         exterior = primitive[owners].copy()
@@ -935,12 +1137,15 @@ def _stable_time_step(
             )
         far_field_start = outlet_end
         if len(geometry.far_field_faces):
-            exterior[far_field_start:] = _far_field_boundary_states(
-                primitive[owners[far_field_start:]],
+            far_field_end = far_field_start + len(geometry.far_field_faces)
+            exterior[far_field_start:far_field_end] = _far_field_boundary_states(
+                primitive[owners[far_field_start:far_field_end]],
                 geometry.far_field_states,
-                geometry.face_normals[boundary_faces[far_field_start:]],
+                geometry.face_normals[boundary_faces[far_field_start:far_field_end]],
                 gamma,
             )
+        if additional_states:
+            exterior[existing_boundary_count:] = np.vstack(additional_states)
         exterior_normal_velocity = np.sum(
             exterior[:, 1:3] * geometry.face_normals[boundary_faces], axis=1
         )
@@ -1039,6 +1244,174 @@ def _far_field_boundary_states(
     return exterior
 
 
+def _pressure_inlet_boundary_states(
+    interior: np.ndarray,
+    normals: np.ndarray,
+    boundary: _PressureInlet,
+    gamma: float,
+    gas_constant: float,
+) -> np.ndarray:
+    if not math.isclose(float(np.linalg.norm(boundary.direction)), 1.0):
+        raise SolverError(
+            f"Pressure inlet '{boundary.patch_name}' has an invalid flow direction."
+        )
+    direction_normal = normals @ boundary.direction
+    if np.any(direction_normal >= -1e-12):
+        raise SolverError(
+            f"Pressure inlet '{boundary.patch_name}' flow direction must point "
+            "into the domain across every face."
+        )
+
+    sound_interior = _sound_speed(interior, gamma)
+    normal_velocity = np.sum(interior[:, 1:3] * normals, axis=1)
+    mach_interior = normal_velocity / sound_interior
+    if np.any(mach_interior >= 1.0):
+        raise SolverError(
+            f"Pressure inlet '{boundary.patch_name}' cannot prescribe a "
+            "supersonic outflow."
+        )
+    total_sound_speed = math.sqrt(
+        gamma * gas_constant * boundary.total_temperature
+    )
+    mach = np.empty(len(interior), dtype=float)
+    for face_id, (mach_inside, sound_inside, normal_direction) in enumerate(
+        zip(mach_interior, sound_interior, direction_normal)
+    ):
+        if mach_inside <= -1.0:
+            raise SolverError(
+                f"Pressure inlet '{boundary.patch_name}' needs Mach number "
+                "to define a supersonic inflow."
+            )
+        outgoing_invariant = (
+            normal_velocity[face_id] + 2.0 * sound_inside / (gamma - 1.0)
+        )
+
+        def invariant_at(
+            candidate: float, face_normal_direction: float
+        ) -> float:
+            temperature_ratio = 1.0 + 0.5 * (gamma - 1.0) * candidate**2
+            sound = total_sound_speed / math.sqrt(temperature_ratio)
+            return sound * (
+                face_normal_direction * candidate + 2.0 / (gamma - 1.0)
+            )
+
+        low_value = invariant_at(0.0, normal_direction)
+        high_value = invariant_at(1.0, normal_direction)
+        if not high_value <= outgoing_invariant <= low_value:
+            raise SolverError(
+                f"Pressure inlet '{boundary.patch_name}' total conditions are "
+                "incompatible with the interior characteristic state."
+            )
+        low, high = 0.0, 1.0
+        for _ in range(64):
+            middle = 0.5 * (low + high)
+            if invariant_at(middle, normal_direction) > outgoing_invariant:
+                low = middle
+            else:
+                high = middle
+        mach[face_id] = 0.5 * (low + high)
+
+    temperature = boundary.total_temperature / (
+        1.0 + 0.5 * (gamma - 1.0) * mach**2
+    )
+    pressure = boundary.total_pressure * (
+        temperature / boundary.total_temperature
+    ) ** (gamma / (gamma - 1.0))
+    density = pressure / (gas_constant * temperature)
+    velocity = (
+        mach[:, None]
+        * np.sqrt(gamma * gas_constant * temperature)[:, None]
+        * boundary.direction[None, :]
+    )
+    states = np.column_stack((density, velocity, pressure))
+    if not np.isfinite(states).all() or np.any(states[:, (0, 3)] <= 0.0):
+        raise SolverError(
+            f"Pressure inlet '{boundary.patch_name}' produced an invalid state."
+        )
+    return states
+
+
+def _mass_flow_inlet_boundary_states(
+    interior: np.ndarray,
+    normals: np.ndarray,
+    face_lengths: np.ndarray,
+    boundary: _MassFlowInlet,
+    gamma: float,
+    gas_constant: float,
+) -> np.ndarray:
+    inward_projection = -(normals @ boundary.direction)
+    if np.any(inward_projection <= 1e-12):
+        raise SolverError(
+            f"Mass-flow inlet '{boundary.patch_name}' direction must point "
+            "into the domain across every face."
+        )
+    if np.any(interior[:, 3] <= 0.0) or not np.isfinite(interior[:, 3]).all():
+        raise SolverError(
+            f"Mass-flow inlet '{boundary.patch_name}' has invalid interior pressure."
+        )
+    heat_capacity = gamma * gas_constant / (gamma - 1.0)
+    maximum_speed = math.sqrt(
+        2.0 * heat_capacity * boundary.total_temperature
+    ) * (1.0 - 1e-12)
+    pressure = interior[:, 3]
+    def flow_at(speed: float) -> float:
+        temperature = boundary.total_temperature - speed**2 / (
+            2.0 * heat_capacity
+        )
+        density = pressure / (gas_constant * temperature)
+        return float(
+            np.sum(
+                density
+                * speed
+                * inward_projection
+                * face_lengths
+            )
+        )
+
+    low, high = 0.0, maximum_speed
+    if flow_at(high) < boundary.mass_flow:
+        raise SolverError(
+            f"Mass-flow inlet '{boundary.patch_name}' cannot satisfy the "
+            "configured flow rate."
+        )
+    for _ in range(80):
+        middle = 0.5 * (low + high)
+        if flow_at(middle) < boundary.mass_flow:
+            low = middle
+        else:
+            high = middle
+    speed = 0.5 * (low + high)
+    temperature = boundary.total_temperature - speed**2 / (
+        2.0 * heat_capacity
+    )
+    density = pressure / (gas_constant * temperature)
+    velocity = speed * boundary.direction[None, :]
+    return np.column_stack((density, velocity, pressure))
+
+
+def _mass_flow_outlet_boundary_states(
+    interior: np.ndarray,
+    normals: np.ndarray,
+    face_lengths: np.ndarray,
+    boundary: _MassFlowOutlet,
+) -> np.ndarray:
+    if np.any(interior[:, 0] <= 0.0) or not np.isfinite(interior[:, 0]).all():
+        raise SolverError(
+            f"Mass-flow outlet '{boundary.patch_name}' has invalid interior density."
+        )
+    states = interior.copy()
+    normal_velocity = boundary.mass_flow / (
+        float(np.sum(face_lengths)) * interior[:, 0]
+    )
+    tangent = np.column_stack((-normals[:, 1], normals[:, 0]))
+    tangential_velocity = np.sum(interior[:, 1:3] * tangent, axis=1)
+    states[:, 1:3] = (
+        normal_velocity[:, None] * normals
+        + tangential_velocity[:, None] * tangent
+    )
+    return states
+
+
 def _finite_boundary_value(value: float, description: str) -> float:
     if isinstance(value, bool):
         raise SolverError(f"{description} must be finite.")
@@ -1056,3 +1429,19 @@ def _positive_boundary_value(value: float, description: str) -> float:
     if number <= 0.0:
         raise SolverError(f"{description} must be positive.")
     return number
+
+
+def _boundary_flow_direction(
+    x: float, y: float, description: str
+) -> np.ndarray:
+    direction = np.array(
+        (
+            _finite_boundary_value(x, f"{description} flow direction X"),
+            _finite_boundary_value(y, f"{description} flow direction Y"),
+        ),
+        dtype=float,
+    )
+    magnitude = float(np.linalg.norm(direction))
+    if not math.isfinite(magnitude) or magnitude <= 1e-12:
+        raise SolverError(f"{description} needs a non-zero flow direction.")
+    return direction / magnitude

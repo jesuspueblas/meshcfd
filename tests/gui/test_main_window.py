@@ -120,6 +120,41 @@ def test_far_field_boundary_uses_density_velocity_and_pressure_controls(qtbot):
     }
 
 
+def test_mass_flow_boundary_controls_use_positive_per_depth_rate(
+    qtbot, monkeypatch
+):
+    monkeypatch.setattr(
+        "meshcfd.gui.main_window.QMessageBox.question",
+        lambda *_: QMessageBox.Yes,
+    )
+    window = MainWindow()
+    qtbot.addWidget(window)
+    case = Case()
+    case.set_mesh(make_mesh())
+    window._set_case(case, None)
+
+    panel = window.boundary_panel
+    panel.patch_list.setCurrentRow(3)
+    panel.kind_combo.setCurrentText("Mass Flow Inlet")
+    rate = panel.value_controls["mass_flow"]
+    assert rate.minimum() > 0.0
+    assert "per unit depth" in rate.toolTip()
+    rate.setValue(2.5)
+    rate.editingFinished.emit()
+    assert window.case.boundary_conditions[3].values["mass_flow"] == 2.5
+    assert set(panel.value_controls) == {
+        "mass_flow",
+        "temperature",
+        "velocity_x",
+        "velocity_y",
+    }
+
+    panel.kind_combo.setCurrentText("Mass Flow Outlet")
+    assert set(panel.value_controls) == {"mass_flow"}
+    assert panel.value_controls["mass_flow"].minimum() > 0.0
+    window._dirty = False
+
+
 def test_boundary_panel_creates_detected_periodic_pair(qtbot):
     window = MainWindow()
     qtbot.addWidget(window)

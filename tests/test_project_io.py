@@ -68,6 +68,33 @@ def test_case_round_trip_keeps_mesh_and_setup(tmp_path):
     assert restored.numerics.end_time == 3.5
 
 
+def test_case_round_trip_preserves_new_boundary_condition_values(tmp_path):
+    case = Case(name="mass-flow")
+    case.set_mesh(make_mesh())
+    case.boundary_conditions[0].kind = "Pressure Inlet"
+    case.boundary_conditions[0].values = {
+        "pressure": 120000.0,
+        "temperature": 310.0,
+        "velocity_x": 1.0,
+        "velocity_y": 0.0,
+    }
+    case.boundary_conditions[1].kind = "Mass Flow Outlet"
+    case.boundary_conditions[1].values = {"mass_flow": 0.45}
+    case.boundary_conditions[3].kind = "Mass Flow Inlet"
+    case.boundary_conditions[3].values = {
+        "mass_flow": 0.45,
+        "temperature": 300.0,
+        "velocity_x": 1.0,
+        "velocity_y": 0.0,
+    }
+    path = tmp_path / "mass-flow.mcf.json"
+
+    save_case(path, case)
+    restored = load_case(path)
+
+    assert case_to_dict(restored) == case_to_dict(case)
+
+
 def test_case_saves_relative_mesh_reference_and_reloads_mesh(tmp_path):
     mesh_path = tmp_path / "mesh.json"
     mesh_path.write_text(json.dumps(mesh_to_dict(make_mesh())), encoding="utf-8")

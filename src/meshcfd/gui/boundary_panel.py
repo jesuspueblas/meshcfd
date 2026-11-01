@@ -35,11 +35,18 @@ BOUNDARY_FIELDS = {
     ),
     "Pressure Inlet": (
         ("pressure", "Total pressure", 101325.0),
-        ("velocity_x", "Velocity X", 0.0),
-        ("velocity_y", "Velocity Y", 0.0),
+        ("velocity_x", "Flow direction X", 1.0),
+        ("velocity_y", "Flow direction Y", 0.0),
         ("temperature", "Total temperature", 288.15),
     ),
     "Pressure Outlet": (("pressure", "Static pressure", 101325.0),),
+    "Mass Flow Inlet": (
+        ("mass_flow", "Mass flow per depth (kg/s/m)", 1.0),
+        ("temperature", "Total temperature", 288.15),
+        ("velocity_x", "Flow direction X", 1.0),
+        ("velocity_y", "Flow direction Y", 0.0),
+    ),
+    "Mass Flow Outlet": (("mass_flow", "Mass flow per depth (kg/s/m)", 1.0),),
     "Symmetry": (),
     "Periodic": (),
     "Far Field": (
@@ -296,12 +303,31 @@ class BoundaryPanel(QWidget):
             return
         for key, label, default in BOUNDARY_FIELDS[condition.kind]:
             control = QDoubleSpinBox(self.editor)
-            minimum = 1e-12 if key in ("density", "pressure", "temperature") else -1e12
+            minimum = (
+                1e-6
+                if key == "mass_flow"
+                else 1e-12
+                if key in ("density", "pressure", "temperature")
+                else -1e12
+            )
             control.setRange(minimum, 1e12)
             control.setDecimals(6)
             control.setSingleStep(1.0)
             control.setValue(condition.values.get(key, default))
-            control.setToolTip(f"{label} prescribed on this patch.")
+            if key == "mass_flow":
+                control.setToolTip(
+                    "Positive flow into the domain at an inlet and out of the "
+                    "domain at an outlet; specified per unit depth."
+                )
+            elif key in ("velocity_x", "velocity_y") and (
+                condition.kind in ("Pressure Inlet", "Mass Flow Inlet")
+            ):
+                control.setToolTip(
+                    "Component of the flow-direction vector; the vector is "
+                    "normalized and must point into the domain."
+                )
+            else:
+                control.setToolTip(f"{label} prescribed on this patch.")
             control.editingFinished.connect(
                 lambda field=key, spin=control: self._set_value(field, spin.value())
             )
