@@ -45,6 +45,22 @@ def make_two_cell_mesh():
     )
 
 
+def send_canvas_mouse_event(canvas, event_type, position, button, buttons):
+    global_position = canvas.viewport().mapToGlobal(position)
+    QApplication.sendEvent(
+        canvas.viewport(),
+        QMouseEvent(
+            event_type,
+            QPointF(position),
+            QPointF(global_position),
+            QPointF(global_position),
+            button,
+            buttons,
+            Qt.NoModifier,
+        ),
+    )
+
+
 def test_solution_is_colored_per_cell_and_mesh_edges_can_be_hidden(qtbot):
     canvas = MeshCanvas()
     qtbot.addWidget(canvas)
@@ -260,6 +276,66 @@ def test_smooth_coloring_interpolates_between_cells(qtbot):
     assert canvas._smooth_solution_image((1.0, 3.0)) is cached
 
 
+def test_box_zoom_fits_the_dragged_rectangle(qtbot):
+    canvas = MeshCanvas()
+    qtbot.addWidget(canvas)
+    canvas.resize(500, 400)
+    canvas.set_mesh(make_two_cell_mesh())
+    canvas.show()
+    qtbot.waitExposed(canvas)
+    canvas.reset_zoom()
+    initial_scale = canvas.transform().m11()
+    canvas.set_interaction_mode("Box Zoom")
+    start = canvas.mapFromScene(QPointF(0.1, 0.1))
+    end = canvas.mapFromScene(QPointF(1.9, 0.9))
+
+    send_canvas_mouse_event(
+        canvas, QEvent.MouseButtonPress, start, Qt.LeftButton, Qt.LeftButton
+    )
+    send_canvas_mouse_event(
+        canvas, QEvent.MouseMove, end, Qt.NoButton, Qt.LeftButton
+    )
+    send_canvas_mouse_event(
+        canvas, QEvent.MouseButtonRelease, end, Qt.LeftButton, Qt.NoButton
+    )
+
+    assert canvas.transform().m11() > initial_scale
+    assert not canvas._zoom_rubber_band.isVisible()
+
+
+def test_cell_info_reports_zero_based_index_centroid_and_active_field(qtbot):
+    canvas = MeshCanvas()
+    qtbot.addWidget(canvas)
+    canvas.resize(500, 400)
+    canvas.set_mesh(make_two_cell_mesh())
+    canvas.set_solution(
+        (InitialState(density=1.0), InitialState(density=3.0))
+    )
+    canvas.set_display_options(
+        show_grid=False,
+        show_mesh=False,
+        solution_variable="Density",
+        color_map="Viridis",
+        color_scale="Linear",
+        smooth_colors=True,
+    )
+    canvas.show()
+    qtbot.waitExposed(canvas)
+    canvas.reset_zoom()
+    selected = []
+    canvas.cell_selected.connect(
+        lambda *details: selected.append(details)
+    )
+    canvas.set_interaction_mode("Cell Info")
+    position = canvas.mapFromScene(QPointF(0.25, 0.5))
+
+    send_canvas_mouse_event(
+        canvas, QEvent.MouseButtonPress, position, Qt.LeftButton, Qt.LeftButton
+    )
+
+    assert selected == [(0, 0.5, 0.5, "Density", 1.0)]
+
+
 def test_solution_toolbar_layout_and_interactive_color_bar(qtbot):
     from meshcfd.gui.main_window import MainWindow
 
@@ -286,6 +362,31 @@ def test_solution_toolbar_layout_and_interactive_color_bar(qtbot):
     assert not panel.show_mesh_checkbox.icon().isNull()
     assert not panel.smooth_colors_checkbox.icon().isNull()
     assert not panel.show_colorbar_checkbox.icon().isNull()
+    assert set(panel.interaction_mode_buttons) == {
+        "Navigate",
+        "Box Zoom",
+        "Cell Info",
+    }
+    assert all(
+        not button.icon().isNull()
+        for button in panel.interaction_mode_buttons.values()
+    )
+    assert panel.interaction_mode_buttons["Navigate"].isChecked()
+    window.case.set_mesh(make_mesh())
+    window._set_case(window.case, None)
+    panel.interaction_mode_buttons["Cell Info"].click()
+    assert window.canvas.interaction_mode == "Cell Info"
+    position = window.canvas.mapFromScene(QPointF(0.5, 0.5))
+    send_canvas_mouse_event(
+        window.canvas,
+        QEvent.MouseButtonPress,
+        position,
+        Qt.LeftButton,
+        Qt.LeftButton,
+    )
+    assert "Cell 0" in window.status_label.text()
+    assert "x = 0.5, y = 0.5" in window.status_label.text()
+    assert "Density = 1.225" in window.status_label.text()
     assert not hasattr(panel, "legend")
     panel.show_colorbar_checkbox.setChecked(True)
     overlay = window.canvas.color_bar_overlay

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 
-from PyQt5.QtCore import QEvent, QPoint, QPointF, QRectF, QSize, Qt
+from PyQt5.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, pyqtSignal
 from PyQt5.QtGui import (
     QBrush,
     QColor,
@@ -23,6 +23,7 @@ from PyQt5.QtWidgets import (
     QGraphicsScene,
     QGraphicsView,
     QHBoxLayout,
+    QRubberBand,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -358,6 +359,8 @@ class ColorBarOverlay(QFrame):
 
 
 class MeshCanvas(QGraphicsView):
+    cell_selected = pyqtSignal(int, float, float, str, object)
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setScene(QGraphicsScene(self))
@@ -377,8 +380,15 @@ class MeshCanvas(QGraphicsView):
         self.color_range: tuple[float, float] | None = None
         self.smooth_colors = False
         self.show_colorbar = False
+        self.interaction_mode = "Navigate"
         self._panning = False
         self._last_mouse_pos = None
+        self._zoom_start: QPoint | None = None
+        self._zoom_rubber_band = QRubberBand(
+            QRubberBand.Rectangle, self.viewport()
+        )
+        self._cell_bounds: tuple[tuple[float, float, float, float], ...] = ()
+        self._cell_centers: tuple[tuple[float, float], ...] = ()
         self._smooth_cache_key = None
         self._smooth_cache: tuple[QImage, QRectF] | None = None
         self.color_bar_overlay = ColorBarOverlay(self)
@@ -491,9 +501,61 @@ class MeshCanvas(QGraphicsView):
         self.mesh = mesh
         self.selected_patch_id = None
         self.solution = None
+        self._cell_bounds = ()
+        self._cell_centers = ()
+        if mesh is not None:
+            cell_bounds = []
+            cell_centers = []
+            for node_ids in mesh.cells:
+                points = [mesh.points[node_id] for node_id in node_ids]
+                cell_bounds.append(
+                    (
+                        min(point[0] for point in points),
+                        min(point[1] for point in points),
+                        max(point[0] for point in points),
+                        max(point[1] for point in points),
+                    )
+                )
+                twice_area = sum(
+                    x0 * y1 - x1 * y0
+                    for (x0, y0), (x1, y1) in zip(
+                        points, points[1:] + points[:1]
+                    )
+                )
+                if abs(twice_area) <= 1e-15:
+                    center = (
+                        sum(point[0] for point in points) / len(points),
+                        sum(point[1] for point in points) / len(points),
+                    )
+                else:
+                    x_sum = 0.0
+                    y_sum = 0.0
+                    for (x0, y0), (x1, y1) in zip(
+                        points, points[1:] + points[:1]
+                    ):
+                        cross = x0 * y1 - x1 * y0
+                        x_sum += (x0 + x1) * cross
+                        y_sum += (y0 + y1) * cross
+                    center = (
+                        x_sum / (3.0 * twice_area),
+                        y_sum / (3.0 * twice_area),
+                    )
+                cell_centers.append(center)
+            self._cell_bounds = tuple(cell_bounds)
+            self._cell_centers = tuple(cell_centers)
         self._smooth_cache_key = None
         self._smooth_cache = None
         self._draw_mesh(fit=True)
+
+    def set_interaction_mode(self, mode: str) -> None:
+        if mode not in ("Navigate", "Box Zoom", "Cell Info"):
+            raise ValueError(f"Unsupported canvas interaction mode: {mode}")
+        self.interaction_mode = mode
+        self._zoom_start = None
+        self._zoom_rubber_band.hide()
+        self.setCursor(
+            Qt.CrossCursor if mode in ("Box Zoom", "Cell Info") else Qt.ArrowCursor
+        )
 
     def set_solution(self, solution: tuple[InitialState, ...] | None) -> None:
         self.solution = solution
@@ -581,6 +643,7 @@ class MeshCanvas(QGraphicsView):
                     item.setPen(QPen(Qt.NoPen))
                 fill = colors[cell_id] if colors else QColor("#F1F5F9")
                 item.setBrush(QBrush(fill))
+                item.setData(0, cell_id)
                 self.scene().addItem(item)
 
         if not self.show_mesh:
@@ -786,11 +849,58 @@ class MeshCanvas(QGraphicsView):
         factor = 1.15 if event.angleDelta().y() > 0 else 1.0 / 1.15
         self.scale(factor, factor)
 
+    def _cell_at(self, scene_position: QPointF) -> int | None:
+        if self.mesh is None:
+            return None
+        for item in self.scene().items(scene_position):
+            cell_id = item.data(0)
+            if isinstance(item, QGraphicsPolygonItem) and cell_id is not None:
+                return int(cell_id)
+        x, y = scene_position.x(), scene_position.y()
+        for cell_id, bounds in enumerate(self._cell_bounds):
+            min_x, min_y, max_x, max_y = bounds
+            if min_x <= x <= max_x and min_y <= y <= max_y:
+                polygon = QPolygonF(
+                    [
+                        QPointF(*self.mesh.points[node_id])
+                        for node_id in self.mesh.cells[cell_id]
+                    ]
+                )
+                if polygon.containsPoint(scene_position, Qt.OddEvenFill):
+                    return cell_id
+        return None
+
+    def _emit_cell_info(self, viewport_position: QPoint) -> None:
+        if self.mesh is None:
+            return
+        cell_id = self._cell_at(self.mapToScene(viewport_position))
+        if cell_id is None:
+            return
+        center_x, center_y = self._cell_centers[cell_id]
+        value = (
+            getattr(self.solution[cell_id], SOLUTION_VARIABLES[self.solution_variable])
+            if self.solution is not None
+            else None
+        )
+        self.cell_selected.emit(
+            cell_id, center_x, center_y, self.solution_variable, value
+        )
+
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MiddleButton:
             self._panning = True
             self._last_mouse_pos = event.pos()
             self.setCursor(Qt.ClosedHandCursor)
+            event.accept()
+            return
+        if event.button() == Qt.LeftButton and self.interaction_mode == "Box Zoom":
+            self._zoom_start = event.pos()
+            self._zoom_rubber_band.setGeometry(QRect(self._zoom_start, self._zoom_start))
+            self._zoom_rubber_band.show()
+            event.accept()
+            return
+        if event.button() == Qt.LeftButton and self.interaction_mode == "Cell Info":
+            self._emit_cell_info(event.pos())
             event.accept()
             return
         super().mousePressEvent(event)
@@ -807,12 +917,32 @@ class MeshCanvas(QGraphicsView):
             )
             event.accept()
             return
+        if self._zoom_start is not None and event.buttons() & Qt.LeftButton:
+            self._zoom_rubber_band.setGeometry(
+                QRect(self._zoom_start, event.pos()).normalized()
+            )
+            event.accept()
+            return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
         if event.button() == Qt.MiddleButton:
             self._panning = False
             self.setCursor(Qt.ArrowCursor)
+            event.accept()
+            return
+        if (
+            event.button() == Qt.LeftButton
+            and self._zoom_start is not None
+            and self.interaction_mode == "Box Zoom"
+        ):
+            selection = QRect(self._zoom_start, event.pos()).normalized()
+            self._zoom_rubber_band.hide()
+            self._zoom_start = None
+            if selection.width() >= 4 and selection.height() >= 4:
+                scene_bounds = self.mapToScene(selection).boundingRect()
+                if scene_bounds.width() > 0.0 and scene_bounds.height() > 0.0:
+                    self.fitInView(scene_bounds, Qt.KeepAspectRatio)
             event.accept()
             return
         super().mouseReleaseEvent(event)

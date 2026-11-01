@@ -7,8 +7,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from PyQt5.QtCore import QSize, Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QColor, QIcon, QKeySequence, QPainter, QPen, QPixmap
+from PyQt5.QtCore import QRect, QSize, Qt, QThread, pyqtSignal
+from PyQt5.QtGui import QColor, QCursor, QIcon, QKeySequence, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
@@ -22,6 +22,7 @@ from PyQt5.QtWidgets import (
     QScrollArea,
     QStyle,
     QToolBar,
+    QToolTip,
 )
 
 from meshcfd.core.initial_conditions import evaluate_initial_conditions
@@ -153,6 +154,7 @@ class MainWindow(QMainWindow):
         self.initial_conditions_panel.changed.connect(self._mark_dirty)
         self.initial_conditions_panel.changed.connect(self._refresh_solution)
         self.visualization_panel.changed.connect(self._update_visualization)
+        self.canvas.cell_selected.connect(self._show_cell_info)
 
         self._create_actions()
         self._create_toolbar()
@@ -385,6 +387,9 @@ class MainWindow(QMainWindow):
     def _update_visualization(self, *_) -> None:
         variable = self.visualization_panel.variable_combo.currentText()
         palette = self.visualization_panel.palette_combo.currentText()
+        self.canvas.set_interaction_mode(
+            self.visualization_panel.interaction_mode
+        )
         self.canvas.set_solution(
             self._simulation_solution or self._initial_solution
         )
@@ -426,6 +431,27 @@ class MainWindow(QMainWindow):
             values,
             palette,
             scale=self.visualization_panel.scale_combo.currentText(),
+        )
+
+    def _show_cell_info(
+        self,
+        cell_id: int,
+        center_x: float,
+        center_y: float,
+        variable: str,
+        value: float | None,
+    ) -> None:
+        value_text = "unavailable" if value is None else f"{value:.6g}"
+        message = (
+            f"Cell {cell_id}\n"
+            f"x = {center_x:.6g}, y = {center_y:.6g}\n"
+            f"{variable} = {value_text}"
+        )
+        self.status_label.setText(
+            message.replace("\n", " | ")
+        )
+        QToolTip.showText(
+            QCursor.pos(), message, self.canvas.viewport(), QRect(), 5000
         )
 
     def _update_mesh_info(self) -> None:

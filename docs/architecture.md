@@ -35,14 +35,17 @@ gui (PyQt5)         io (JSON)
 - `meshcfd.gui.visualization_panel` selects the initial-solution field,
   palette, linear or logarithmic scale, automatic or manual color limits, and
   mesh-edge visibility and optional smooth coloring; it is hosted in a top
-  toolbar. The canvas draws an adaptive coordinate-labeled grid and cell-
-  centered or nodally interpolated solution colors. Manual limits clamp values
-  to the palette endpoints, and logarithmic scales require positive limits and
-  field values. An optional horizontal or vertical color legend overlays the
-  plot and can be moved by dragging the legend and resized with its corner
-  grip. Vertical legends show their numeric labels to the right of the color
-  ramp and identify the displayed variable. Smooth colors are rendered using
-  native Qt gradients to avoid per-pixel Python loops.
+  toolbar. Its interaction-mode selector chooses navigation, drag-to-zoom, or
+  cell inspection; inspection reports the zero-based cell index, geometric
+  centroid, and active field value in the main-window status bar. The canvas
+  draws an adaptive coordinate-labeled grid and cell-centered or nodally
+  interpolated solution colors. Manual limits clamp values to the palette
+  endpoints, and logarithmic scales require positive limits and field values.
+  An optional horizontal or vertical color legend overlays the plot and can be
+  moved by dragging the legend and resized with its corner grip. Vertical
+  legends show their numeric labels to the right of the color ramp and identify
+  the displayed variable. Smooth colors are rendered using native Qt gradients
+  to avoid per-pixel Python loops.
 - `meshcfd.gui.boundary_panel` configures one boundary condition per patch and
   creates compatible x- or y-periodic pairs with their detected pitch.
 - `meshcfd.gui.numerics_panel` edits reconstruction, limiter, flux,

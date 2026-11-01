@@ -42,6 +42,11 @@ Conditions and Initial Conditions are initially stacked on the left,
 Numerical Setup is on the right, and Solution View is available in its own
 top toolbar. The Solution View toolbar controls the displayed field,
 mesh-edge visibility, smooth coloring, and color scale.
+Choose Box Zoom in Solution View and drag with the left mouse button to zoom
+to a region. Choose Cell Info and click a cell to show its zero-based index,
+geometric centroid coordinates, and the value of the currently displayed
+field in the status bar. Navigate mode preserves wheel zoom and middle-button
+panning.
 The Output dock is at the bottom by default and can be shown or hidden from the
 View menu. Its residual history is reported per time step; use Clear Output in
 the View menu to clear the terminal.

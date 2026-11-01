@@ -7,6 +7,7 @@ import math
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PyQt5.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -50,6 +51,37 @@ def _option_icon(kind: str) -> QIcon:
             painter.fillRect(3 + index * 2, 3, 3, 14, QColor(color))
         painter.setPen(QPen(outline, 1))
         painter.drawRect(2, 2, 15, 16)
+    elif kind == "navigate":
+        painter.setPen(QPen(outline, 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        cursor = QPainterPath()
+        cursor.moveTo(4, 2)
+        cursor.lineTo(5, 17)
+        cursor.lineTo(9, 13)
+        cursor.lineTo(12, 19)
+        cursor.lineTo(15, 17)
+        cursor.lineTo(12, 11)
+        cursor.lineTo(18, 11)
+        cursor.closeSubpath()
+        painter.setBrush(QColor("#FFFFFF"))
+        painter.drawPath(cursor)
+    elif kind == "box_zoom":
+        painter.setPen(QPen(outline, 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawRect(2, 3, 13, 13)
+        painter.setPen(QPen(accent, 2))
+        painter.drawLine(6, 8, 11, 8)
+        painter.drawLine(9, 6, 9, 11)
+        painter.setPen(QPen(outline, 2, Qt.SolidLine, Qt.RoundCap))
+        painter.drawLine(14, 14, 19, 19)
+    elif kind == "cell_info":
+        painter.setPen(QPen(outline, 1.3))
+        painter.drawRoundedRect(2, 2, 16, 16, 2, 2)
+        painter.drawLine(7, 3, 7, 17)
+        painter.drawLine(13, 3, 13, 17)
+        painter.drawLine(3, 7, 17, 7)
+        painter.drawLine(3, 13, 17, 13)
+        painter.setPen(QPen(accent, 2, Qt.SolidLine, Qt.RoundCap))
+        painter.drawPoint(16, 4)
+        painter.drawLine(16, 8, 16, 14)
     painter.end()
     return QIcon(pixmap)
 
@@ -62,6 +94,27 @@ class VisualizationPanel(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 3, 8, 3)
         layout.setSpacing(7)
+        self.interaction_mode_group = QButtonGroup(self)
+        self.interaction_mode_group.setExclusive(True)
+        self.interaction_mode_buttons: dict[str, QToolButton] = {}
+        self.interaction_mode = "Navigate"
+        for mode, icon, tooltip in (
+            ("Navigate", "navigate", "Navigate: wheel zoom, middle-button pan"),
+            ("Box Zoom", "box_zoom", "Box zoom: drag a rectangle with left button"),
+            ("Cell Info", "cell_info", "Cell info: click a cell to inspect its values"),
+        ):
+            button = self._icon_toggle(icon, tooltip, checked=mode == "Navigate")
+            button.setAccessibleName(mode)
+            button.setToolTip(tooltip)
+            self.interaction_mode_group.addButton(button)
+            self.interaction_mode_buttons[mode] = button
+            layout.addWidget(button)
+            button.toggled.connect(
+                lambda checked, selected_mode=mode: self._set_interaction_mode(
+                    selected_mode, checked
+                )
+            )
+        self._add_separator(layout)
         self.show_mesh_checkbox = self._icon_toggle(
             "mesh", "Show mesh edges", checked=True
         )
@@ -131,6 +184,11 @@ class VisualizationPanel(QWidget):
         self.orientation_combo.currentTextChanged.connect(self.changed.emit)
         self.minimum_spin.valueChanged.connect(self.changed.emit)
         self.maximum_spin.valueChanged.connect(self.changed.emit)
+
+    def _set_interaction_mode(self, mode: str, checked: bool) -> None:
+        if checked and self.interaction_mode != mode:
+            self.interaction_mode = mode
+            self.changed.emit()
 
     def _icon_toggle(
         self, icon_name: str, tooltip: str, *, checked: bool = False
