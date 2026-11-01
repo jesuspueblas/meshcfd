@@ -84,6 +84,32 @@ def test_solution_is_colored_per_cell_and_mesh_edges_can_be_hidden(qtbot):
     assert item.pen().style() == Qt.NoPen
 
 
+@pytest.mark.parametrize(
+    ("variable", "expected"),
+    (
+        ("Turbulent k", 0.02),
+        ("Specific dissipation rate", 3.0),
+    ),
+)
+def test_sst_fields_can_be_visualized(qtbot, variable, expected):
+    canvas = MeshCanvas()
+    qtbot.addWidget(canvas)
+    canvas.set_mesh(make_mesh())
+    canvas.set_solution(
+        (InitialState(turbulence_k=0.02, turbulence_omega=3.0),)
+    )
+
+    values = canvas.set_display_options(
+        show_grid=True,
+        show_mesh=True,
+        solution_variable=variable,
+        color_map="Viridis",
+        color_scale="Linear",
+    )
+
+    assert values == (expected,)
+
+
 def test_logarithmic_color_scale_rejects_non_positive_values(qtbot):
     canvas = MeshCanvas()
     qtbot.addWidget(canvas)

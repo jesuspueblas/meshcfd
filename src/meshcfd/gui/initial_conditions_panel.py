@@ -43,6 +43,8 @@ _BASE_FIELDS = (
     ("velocity_x", "Base velocity X", -1e12, 1e12, 0.0),
     ("velocity_y", "Base velocity Y", -1e12, 1e12, 0.0),
     ("pressure", "Base pressure", 1e-12, 1e12, 101325.0),
+    ("turbulence_k", "Initial k", 0.0, 1e12, 1e-6),
+    ("turbulence_omega", "Initial omega", 1e-12, 1e12, 1.0),
 )
 
 
@@ -63,6 +65,10 @@ class InitialConditionsPanel(QWidget):
             control.setRange(minimum, maximum)
             control.setDecimals(8)
             control.setValue(default)
+            if key == "turbulence_k":
+                control.setToolTip("Initial turbulent kinetic energy k (m²/s²).")
+            elif key == "turbulence_omega":
+                control.setToolTip("Initial specific dissipation rate omega (1/s).")
             control.valueChanged.connect(
                 lambda value, field=key: self._set_base_value(field, value)
             )

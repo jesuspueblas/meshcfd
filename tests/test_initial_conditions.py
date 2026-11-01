@@ -85,7 +85,12 @@ def test_initial_conditions_use_cell_centroids_and_later_blocks_win():
 
 def test_initial_conditions_use_base_state_outside_all_blocks():
     settings = InitialConditionSettings(
-        base_state=InitialState(density=0.9, pressure=90000.0),
+        base_state=InitialState(
+            density=0.9,
+            pressure=90000.0,
+            turbulence_k=0.025,
+            turbulence_omega=12.0,
+        ),
         blocks=[InitialConditionBlock(domain="x < 0", density="2")],
     )
 
@@ -93,6 +98,21 @@ def test_initial_conditions_use_base_state_outside_all_blocks():
 
     assert state.density == 0.9
     assert state.pressure == 90000.0
+    assert state.turbulence_k == 0.025
+    assert state.turbulence_omega == 12.0
+
+
+def test_initial_condition_blocks_preserve_base_turbulence_fields():
+    settings = InitialConditionSettings(
+        base_state=InitialState(turbulence_k=0.025, turbulence_omega=12.0),
+        blocks=[InitialConditionBlock(domain="True", density="1.1")],
+    )
+
+    (state,) = evaluate_initial_conditions(make_mesh(), settings)
+
+    assert state.density == 1.1
+    assert state.turbulence_k == 0.025
+    assert state.turbulence_omega == 12.0
 
 
 def test_initial_conditions_reject_non_positive_density():

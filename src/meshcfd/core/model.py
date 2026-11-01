@@ -81,6 +81,8 @@ class NumericalSettings:
     prandtl_number: float = 0.72
     acceleration_x: float = 0.0
     acceleration_y: float = 0.0
+    turbulence_model: str = "None"
+    turbulence_wall_treatment: str = "Wall-resolved"
 
 
 @dataclass
@@ -89,6 +91,8 @@ class InitialState:
     velocity_x: float = 0.0
     velocity_y: float = 0.0
     pressure: float = 101325.0
+    turbulence_k: float = 1e-6
+    turbulence_omega: float = 1.0
 
 
 @dataclass

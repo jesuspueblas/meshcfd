@@ -118,6 +118,42 @@ def test_viscous_and_acceleration_controls_update_case(qtbot, monkeypatch):
     window._dirty = False
 
 
+def test_sst_controls_update_model_and_boundary_inputs(qtbot, monkeypatch):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    monkeypatch.setattr(window, "_confirm_discard_changes", lambda: True)
+    case = Case()
+    case.set_mesh(make_mesh())
+    window._set_case(case, None)
+
+    panel = window.numerics_panel
+    panel.turbulence_model_combo.setCurrentText("Menter k-omega SST")
+    panel.turbulence_wall_treatment_combo.setCurrentText("Wall functions")
+    assert window.case.numerics.turbulence_model == "Menter k-omega SST"
+    assert window.case.numerics.turbulence_wall_treatment == "Wall functions"
+    initial_panel = window.initial_conditions_panel
+    initial_panel.base_controls["turbulence_k"].setValue(0.025)
+    initial_panel.base_controls["turbulence_omega"].setValue(12.0)
+    assert window.case.initial_conditions.base_state.turbulence_k == 0.025
+    assert window.case.initial_conditions.base_state.turbulence_omega == 12.0
+
+    boundary_panel = window.boundary_panel
+    boundary_panel.patch_list.setCurrentRow(1)
+    boundary_panel.kind_combo.setCurrentText("Velocity Inlet")
+    assert "turbulence_intensity" in boundary_panel.value_controls
+    assert "turbulence_length_scale" in boundary_panel.value_controls
+    intensity = boundary_panel.value_controls["turbulence_intensity"]
+    assert intensity.minimum() == 0.0
+    assert intensity.maximum() == 100.0
+    intensity.setValue(3.0)
+    intensity.editingFinished.emit()
+    assert window.case.boundary_conditions[1].values["turbulence_intensity"] == 3.0
+
+    panel.turbulence_model_combo.setCurrentText("None")
+    assert "turbulence_intensity" not in boundary_panel.value_controls
+    window._dirty = False
+
+
 def test_wall_thermal_condition_selects_temperature_or_heat_flux(
     qtbot, monkeypatch
 ):

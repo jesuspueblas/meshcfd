@@ -72,6 +72,8 @@ SOLUTION_VARIABLES = {
     "Velocity X": "velocity_x",
     "Velocity Y": "velocity_y",
     "Pressure": "pressure",
+    "Turbulent k": "turbulence_k",
+    "Specific dissipation rate": "turbulence_omega",
 }
 
 

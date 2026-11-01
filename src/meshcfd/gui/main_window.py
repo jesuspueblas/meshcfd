@@ -148,6 +148,9 @@ class MainWindow(QMainWindow):
         self.boundary_panel.changed.connect(self._clear_simulation_solution)
         self.boundary_panel.patch_selected.connect(self.canvas.select_patch)
         self.numerics_panel.changed.connect(self._mark_dirty)
+        self.numerics_panel.turbulence_model_combo.currentTextChanged.connect(
+            self.boundary_panel.refresh_value_fields
+        )
         self.numerics_panel.live_solution_changed.connect(
             self._set_live_solution_updates
         )

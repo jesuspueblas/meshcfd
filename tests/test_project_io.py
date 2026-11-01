@@ -60,6 +60,13 @@ def test_case_round_trip_keeps_mesh_and_setup(tmp_path):
     case.numerics.sutherland_reference_viscosity = 1.8e-5
     case.numerics.prandtl_number = 0.74
     case.numerics.acceleration_y = -9.81
+    case.numerics.turbulence_model = "Menter k-omega SST"
+    case.numerics.turbulence_wall_treatment = "Wall functions"
+    case.initial_conditions.base_state.turbulence_k = 0.025
+    case.initial_conditions.base_state.turbulence_omega = 12.0
+    case.boundary_conditions[1].values.update(
+        turbulence_intensity=2.5, turbulence_length_scale=0.15
+    )
     case.boundary_conditions[0].thermal_condition = "Heat Flux"
     case.boundary_conditions[0].mechanical_condition = "Slip"
     case.boundary_conditions[0].values["heat_flux"] = 250.0
@@ -77,6 +84,12 @@ def test_case_round_trip_keeps_mesh_and_setup(tmp_path):
     assert restored.numerics.sutherland_reference_viscosity == 1.8e-5
     assert restored.numerics.prandtl_number == 0.74
     assert restored.numerics.acceleration_y == -9.81
+    assert restored.numerics.turbulence_model == "Menter k-omega SST"
+    assert restored.numerics.turbulence_wall_treatment == "Wall functions"
+    assert restored.initial_conditions.base_state.turbulence_k == 0.025
+    assert restored.initial_conditions.base_state.turbulence_omega == 12.0
+    assert restored.boundary_conditions[1].values["turbulence_intensity"] == 2.5
+    assert restored.boundary_conditions[1].values["turbulence_length_scale"] == 0.15
     assert restored.boundary_conditions[0].thermal_condition == "Heat Flux"
     assert restored.boundary_conditions[0].mechanical_condition == "Slip"
     assert restored.boundary_conditions[0].values["heat_flux"] == 250.0
@@ -122,6 +135,22 @@ def test_version_seven_wall_defaults_to_no_slip():
         boundary.mechanical_condition == "No-slip"
         for boundary in restored.boundary_conditions
     )
+
+
+def test_version_eight_case_loads_with_laminar_defaults():
+    data = case_to_dict(Case(name="legacy"))
+    data["version"] = 8
+    data["numerics"].pop("turbulence_model")
+    data["numerics"].pop("turbulence_wall_treatment")
+    data["initial_conditions"]["base_state"].pop("turbulence_k")
+    data["initial_conditions"]["base_state"].pop("turbulence_omega")
+
+    restored = case_from_dict(data)
+
+    assert restored.numerics.turbulence_model == "None"
+    assert restored.numerics.turbulence_wall_treatment == "Wall-resolved"
+    assert restored.initial_conditions.base_state.turbulence_k == 1e-6
+    assert restored.initial_conditions.base_state.turbulence_omega == 1.0
 
 
 def test_case_round_trip_preserves_new_boundary_condition_values(tmp_path):
@@ -184,7 +213,7 @@ def test_case_saves_relative_mesh_reference_and_reloads_mesh(tmp_path):
     save_case(case_path, case)
 
     saved_data = json.loads(case_path.read_text(encoding="utf-8"))
-    assert saved_data["version"] == 8
+    assert saved_data["version"] == 9
     assert saved_data["mesh"] == "../mesh.json"
     assert isinstance(saved_data["mesh"], str)
 
@@ -225,13 +254,15 @@ def test_case_round_trip_preserves_final_solution(tmp_path):
     saved_data = json.loads(path.read_text(encoding="utf-8"))
     restored = load_case(path)
 
-    assert saved_data["version"] == 8
+    assert saved_data["version"] == 9
     assert saved_data["final_solution"] == [
         {
             "density": 0.9,
             "velocity_x": 12.0,
             "velocity_y": -3.0,
             "pressure": 98000.0,
+            "turbulence_k": 1e-6,
+            "turbulence_omega": 1.0,
         }
     ]
     assert restored.final_solution == case.final_solution
@@ -303,7 +334,7 @@ def test_periodic_pair_detection_and_case_round_trip(tmp_path):
     assert restored.periodic_pairs == case.periodic_pairs
     assert restored.boundary_conditions[1].kind == "Periodic"
     assert restored.boundary_conditions[3].kind == "Periodic"
-    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 8
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 9
 
 
 def test_version_four_periodic_case_defaults_end_time():

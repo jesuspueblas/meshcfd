@@ -26,6 +26,8 @@ from meshcfd.core.solver import (
     _parabolic_reconstruction,
     _pressure_inlet_boundary_states,
     _residual,
+    _sst_fields,
+    _turbulence_boundary_values,
     _viscous_flux,
     solve_case,
 )
@@ -177,6 +179,54 @@ def test_viscous_flux_includes_heat_conduction_and_stokes_stress():
     assert flux[0, 1] == pytest.approx(2.0 * (4.0 - 10.0 / 3.0))
     assert flux[0, 2] == pytest.approx(2.0 * (1.0 + 2.0))
     assert flux[0, 3] == pytest.approx(5.0 * flux[0, 1] + 7.0 * flux[0, 2] + 12.0)
+
+
+def test_sst_closure_returns_finite_turbulent_viscosity():
+    case = make_periodic_case()
+    case.numerics.viscosity_model = "Constant"
+    case.numerics.dynamic_viscosity = 1e-3
+    case.numerics.turbulence_model = "Menter k-omega SST"
+    geometry = _build_geometry(case.mesh, case)
+    primitive = np.array(((1.0, 0.0, 0.0, 1.0),))
+    turbulence = np.array(((0.01, 10.0),))
+
+    fields = _sst_fields(primitive, turbulence, geometry, case.numerics)
+
+    assert fields[0][0] == pytest.approx(0.001)
+    assert np.isfinite(fields[0]).all()
+    assert np.all(fields[0] >= 0.0)
+
+
+def test_sst_inlet_values_come_from_intensity_and_length_scale():
+    case = make_periodic_case()
+    case.periodic_pairs.clear()
+    case.numerics.gas_constant = 1.0
+    case.numerics.turbulence_model = "Menter k-omega SST"
+    for boundary in case.boundary_conditions:
+        boundary.kind = "Wall"
+    inlet = case.boundary_conditions[1]
+    inlet.kind = "Velocity Inlet"
+    inlet.values = {
+        "density": 1.0,
+        "temperature": 1.0,
+        "velocity_x": 3.0,
+        "velocity_y": 4.0,
+        "turbulence_intensity": 2.0,
+        "turbulence_length_scale": 0.5,
+    }
+    geometry = _build_geometry(case.mesh, case)
+    primitive = np.array(((1.0, 0.0, 0.0, 1.0),))
+    turbulence = np.array(((0.01, 10.0),))
+
+    boundary_values = _turbulence_boundary_values(
+        primitive, turbulence, geometry, case.numerics
+    )
+
+    expected_k = 1.5 * (0.02 * 5.0) ** 2
+    assert boundary_values[1][0] == pytest.approx(expected_k)
+    assert boundary_values[1][1] == pytest.approx(
+        math.sqrt(expected_k) / (0.09**0.25 * 0.5)
+    )
 
 
 def test_wall_heat_flux_positive_into_fluid_adds_energy():
@@ -827,3 +877,66 @@ def test_isentropic_euler_vortex_runs_for_one_period(reconstruction):
         initial_density
     )
     assert relative_density_error < 0.2
+
+
+@pytest.mark.parametrize("wall_treatment", ("Wall-resolved", "Wall functions"))
+def test_sst_solver_advances_with_both_wall_treatments(wall_treatment):
+    case = make_periodic_case(2, 2)
+    case.periodic_pairs.clear()
+    for boundary in case.boundary_conditions:
+        boundary.kind = "Wall"
+        boundary.mechanical_condition = "No-slip"
+        boundary.values = {"temperature": 1.0}
+    inlet = case.boundary_conditions[3]
+    inlet.kind = "Velocity Inlet"
+    inlet.values = {
+        "density": 1.0,
+        "velocity_x": 0.1,
+        "velocity_y": 0.0,
+        "temperature": 1.0,
+        "turbulence_intensity": 2.0,
+        "turbulence_length_scale": 0.1,
+    }
+    outlet = case.boundary_conditions[1]
+    outlet.kind = "Pressure Outlet"
+    outlet.values = {"pressure": 1.0}
+    case.numerics.viscosity_model = "Constant"
+    case.numerics.dynamic_viscosity = 1e-3
+    case.numerics.gas_constant = 1.0
+    case.numerics.reconstruction = "First order"
+    case.numerics.turbulence_model = "Menter k-omega SST"
+    case.numerics.turbulence_wall_treatment = wall_treatment
+    case.numerics.end_time = 1e-5
+    case.numerics.max_iterations = 2
+
+    result = solve_case(
+        case,
+        tuple(
+            InitialState(
+                1.0,
+                0.0,
+                0.0,
+                1.0,
+                turbulence_k=0.01,
+                turbulence_omega=10.0,
+            )
+            for _cell in case.mesh.cells
+        ),
+    )
+
+    assert result.completed
+    assert result.steps == 1
+    assert all(
+        state.turbulence_k >= 0.0
+        and state.turbulence_omega > 0.0
+        and all(
+            math.isfinite(value)
+            for value in (
+                state.density,
+                state.pressure,
+                state.turbulence_k,
+                state.turbulence_omega,
+            )
+        )
+        for state in result.states
+    )

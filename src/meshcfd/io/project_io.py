@@ -28,7 +28,7 @@ from meshcfd.core.periodic import detect_periodic_pair
 from meshcfd.io.mesh_io import load_mesh, mesh_from_dict, mesh_to_dict
 
 PROJECT_FORMAT = "meshcfd-case"
-PROJECT_VERSION = 8
+PROJECT_VERSION = 9
 
 
 def case_to_dict(
@@ -40,6 +40,13 @@ def case_to_dict(
         _thermal_condition(condition.thermal_condition)
     if case.numerics.viscosity_model not in ("Inviscid", "Constant", "Sutherland"):
         raise ValueError("Unsupported viscosity model.")
+    if case.numerics.turbulence_model not in ("None", "Menter k-omega SST"):
+        raise ValueError("Unsupported turbulence model.")
+    if case.numerics.turbulence_wall_treatment not in (
+        "Wall-resolved",
+        "Wall functions",
+    ):
+        raise ValueError("Unsupported turbulence wall treatment.")
     _positive_float(case.numerics.prandtl_number, "Prandtl number")
     _positive_float(case.numerics.dynamic_viscosity, "Dynamic viscosity")
     _positive_float(
@@ -134,6 +141,10 @@ def case_to_dict(
             "prandtl_number": case.numerics.prandtl_number,
             "acceleration_x": case.numerics.acceleration_x,
             "acceleration_y": case.numerics.acceleration_y,
+            "turbulence_model": case.numerics.turbulence_model,
+            "turbulence_wall_treatment": (
+                case.numerics.turbulence_wall_treatment
+            ),
         },
         "initial_conditions": initial_conditions,
         "final_solution": final_solution,
@@ -154,6 +165,7 @@ def case_from_dict(
         5,
         6,
         7,
+        8,
         PROJECT_VERSION,
     ):
         raise ValueError(
@@ -307,6 +319,12 @@ def case_from_dict(
             raw_numerics.get("acceleration_y", defaults.acceleration_y),
             "Acceleration Y",
         ),
+        turbulence_model=raw_numerics.get(
+            "turbulence_model", defaults.turbulence_model
+        ),
+        turbulence_wall_treatment=raw_numerics.get(
+            "turbulence_wall_treatment", defaults.turbulence_wall_treatment
+        ),
     )
     for key, choices in (
         ("reconstruction", RECONSTRUCTION_SCHEMES),
@@ -314,6 +332,8 @@ def case_from_dict(
         ("flux", FLUX_SCHEMES),
         ("time_integration", TIME_INTEGRATION_SCHEMES),
         ("viscosity_model", ("Inviscid", "Constant", "Sutherland")),
+        ("turbulence_model", ("None", "Menter k-omega SST")),
+        ("turbulence_wall_treatment", ("Wall-resolved", "Wall functions")),
     ):
         if getattr(settings, key) not in choices:
             raise ValueError(f"Unsupported numerical setting for {key}.")
@@ -387,6 +407,12 @@ def _final_solution_to_dict(
                 "velocity_x": velocity_x,
                 "velocity_y": velocity_y,
                 "pressure": pressure,
+                "turbulence_k": _finite_non_negative_float(
+                    state.turbulence_k, "Final solution turbulence k"
+                ),
+                "turbulence_omega": _positive_float(
+                    state.turbulence_omega, "Final solution turbulence omega"
+                ),
             }
         )
     return result
@@ -424,6 +450,14 @@ def _final_solution_from_dict(
                 pressure=_positive_float(
                     raw_state.get("pressure"),
                     f"Final solution pressure at cell {index}",
+                ),
+                turbulence_k=_finite_non_negative_float(
+                    raw_state.get("turbulence_k", 1e-6),
+                    f"Final solution turbulence k at cell {index}",
+                ),
+                turbulence_omega=_positive_float(
+                    raw_state.get("turbulence_omega", 1.0),
+                    f"Final solution turbulence omega at cell {index}",
                 ),
             )
         )
@@ -513,6 +547,14 @@ def _initial_conditions_from_dict(data: Any) -> InitialConditionSettings:
         pressure=_positive_float(
             raw_base.get("pressure", defaults.pressure), "Pressure"
         ),
+        turbulence_k=_finite_non_negative_float(
+            raw_base.get("turbulence_k", defaults.turbulence_k),
+            "Initial turbulence k",
+        ),
+        turbulence_omega=_positive_float(
+            raw_base.get("turbulence_omega", defaults.turbulence_omega),
+            "Initial turbulence omega",
+        ),
     )
     raw_blocks = data.get("blocks", [])
     if not isinstance(raw_blocks, list):
@@ -552,6 +594,8 @@ def _initial_conditions_to_dict(
     _finite_float(state.velocity_x, "Velocity X")
     _finite_float(state.velocity_y, "Velocity Y")
     _positive_float(state.pressure, "Pressure")
+    _finite_non_negative_float(state.turbulence_k, "Initial turbulence k")
+    _positive_float(state.turbulence_omega, "Initial turbulence omega")
     blocks = []
     for block in settings.blocks:
         if not isinstance(block.name, str) or not block.name.strip():
@@ -580,6 +624,8 @@ def _initial_conditions_to_dict(
             "velocity_x": state.velocity_x,
             "velocity_y": state.velocity_y,
             "pressure": state.pressure,
+            "turbulence_k": state.turbulence_k,
+            "turbulence_omega": state.turbulence_omega,
         },
         "blocks": blocks,
     }

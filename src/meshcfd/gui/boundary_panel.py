@@ -33,12 +33,16 @@ BOUNDARY_FIELDS = {
         ("velocity_x", "Velocity X", 0.0),
         ("velocity_y", "Velocity Y", 0.0),
         ("temperature", "Temperature", 288.15),
+        ("turbulence_intensity", "Turbulence intensity (%)", 1.0),
+        ("turbulence_length_scale", "Turbulence length scale (m)", 0.01),
     ),
     "Pressure Inlet": (
         ("pressure", "Total pressure", 101325.0),
         ("velocity_x", "Flow direction X", 1.0),
         ("velocity_y", "Flow direction Y", 0.0),
         ("temperature", "Total temperature", 288.15),
+        ("turbulence_intensity", "Turbulence intensity (%)", 1.0),
+        ("turbulence_length_scale", "Turbulence length scale (m)", 0.01),
     ),
     "Pressure Outlet": (("pressure", "Static pressure", 101325.0),),
     "Mass Flow Inlet": (
@@ -46,6 +50,8 @@ BOUNDARY_FIELDS = {
         ("temperature", "Total temperature", 288.15),
         ("velocity_x", "Flow direction X", 1.0),
         ("velocity_y", "Flow direction Y", 0.0),
+        ("turbulence_intensity", "Turbulence intensity (%)", 1.0),
+        ("turbulence_length_scale", "Turbulence length scale (m)", 0.01),
     ),
     "Mass Flow Outlet": (("mass_flow", "Mass flow per depth (kg/s/m)", 1.0),),
     "Symmetry": (),
@@ -55,6 +61,8 @@ BOUNDARY_FIELDS = {
         ("velocity_x", "Velocity X", 0.0),
         ("velocity_y", "Velocity Y", 0.0),
         ("pressure", "Pressure", 101325.0),
+        ("turbulence_intensity", "Turbulence intensity (%)", 1.0),
+        ("turbulence_length_scale", "Turbulence length scale (m)", 0.01),
     ),
 }
 
@@ -166,6 +174,9 @@ class BoundaryPanel(QWidget):
         self.kind_combo.blockSignals(True)
         self.kind_combo.setCurrentText(condition.kind)
         self.kind_combo.blockSignals(False)
+        self._rebuild_value_fields()
+
+    def refresh_value_fields(self) -> None:
         self._rebuild_value_fields()
 
     def _change_kind(self, kind: str) -> None:
@@ -345,16 +356,31 @@ class BoundaryPanel(QWidget):
                 if condition.thermal_condition == "Temperature"
                 else BOUNDARY_FIELDS["Wall Heat Flux"]
             )
+        if self.case.numerics.turbulence_model != "Menter k-omega SST":
+            fields = tuple(
+                field
+                for field in fields
+                if field[0]
+                not in ("turbulence_intensity", "turbulence_length_scale")
+            )
         for key, label, default in fields:
             control = QDoubleSpinBox(self.editor)
             minimum = (
                 1e-6
                 if key == "mass_flow"
                 else 1e-12
-                if key in ("density", "pressure", "temperature")
+                if key in (
+                    "density",
+                    "pressure",
+                    "temperature",
+                    "turbulence_length_scale",
+                    "turbulence_intensity",
+                )
                 else -1e12
             )
             control.setRange(minimum, 1e12)
+            if key == "turbulence_intensity":
+                control.setRange(0.0, 100.0)
             control.setDecimals(6)
             control.setSingleStep(1.0)
             control.setValue(condition.values.get(key, default))
@@ -367,6 +393,16 @@ class BoundaryPanel(QWidget):
                 control.setToolTip(
                     "Positive flow into the domain at an inlet and out of the "
                     "domain at an outlet; specified per unit depth."
+                )
+            elif key == "turbulence_intensity":
+                control.setToolTip(
+                    "Inlet turbulence intensity in percent; used with the length "
+                    "scale to derive k and omega."
+                )
+            elif key == "turbulence_length_scale":
+                control.setToolTip(
+                    "Inlet turbulence length scale in metres; used with intensity "
+                    "to derive k and omega."
                 )
             elif key in ("velocity_x", "velocity_y") and (
                 condition.kind in ("Pressure Inlet", "Mass Flow Inlet")

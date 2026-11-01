@@ -71,6 +71,12 @@ class NumericsPanel(QWidget):
         self.prandtl_number_spin = self._double_spin(1e-6, 1e6, 0.72, 5)
         self.acceleration_x_spin = self._double_spin(-1e12, 1e12, 0.0, 6)
         self.acceleration_y_spin = self._double_spin(-1e12, 1e12, 0.0, 6)
+        self.turbulence_model_combo = self._combo(
+            ("None", "Menter k-omega SST")
+        )
+        self.turbulence_wall_treatment_combo = self._combo(
+            ("Wall-resolved", "Wall functions")
+        )
         self.viscosity_model_combo.setToolTip(
             "Inviscid disables molecular diffusion. Sutherland uses air reference "
             "values and temperature in kelvin."
@@ -88,6 +94,14 @@ class NumericsPanel(QWidget):
         )
         self.acceleration_x_spin.setToolTip("Constant volumetric acceleration X (m/s²).")
         self.acceleration_y_spin.setToolTip("Constant volumetric acceleration Y (m/s²).")
+        self.turbulence_model_combo.setToolTip(
+            "Compressible Menter SST two-equation model. Requires Constant or "
+            "Sutherland molecular viscosity."
+        )
+        self.turbulence_wall_treatment_combo.setToolTip(
+            "Wall-resolved uses k=0 and the SST near-wall omega condition. "
+            "Wall functions use an equilibrium logarithmic law."
+        )
         form.addRow("CFL number:", self.cfl_spin)
         form.addRow("Maximum time steps:", self.iterations_spin)
         form.addRow("End time:", self.end_time_spin)
@@ -102,6 +116,8 @@ class NumericsPanel(QWidget):
         form.addRow("Prandtl:", self.prandtl_number_spin)
         form.addRow("Accel. X (m/s^2):", self.acceleration_x_spin)
         form.addRow("Accel. Y (m/s^2):", self.acceleration_y_spin)
+        form.addRow("Turbulence model:", self.turbulence_model_combo)
+        form.addRow("SST wall treatment:", self.turbulence_wall_treatment_combo)
 
         self.live_solution_checkbox = QCheckBox("Update during run", self)
         self.live_solution_checkbox.setToolTip(
@@ -136,6 +152,8 @@ class NumericsPanel(QWidget):
             self.prandtl_number_spin,
             self.acceleration_x_spin,
             self.acceleration_y_spin,
+            self.turbulence_model_combo,
+            self.turbulence_wall_treatment_combo,
         )
         for combo in (
             self.reconstruction_combo,
@@ -161,8 +179,16 @@ class NumericsPanel(QWidget):
         ):
             control.valueChanged.connect(self._sync_case)
         self.viscosity_model_combo.currentTextChanged.connect(self._sync_case)
+        self.turbulence_model_combo.currentTextChanged.connect(
+            self._update_turbulence_controls
+        )
+        self.turbulence_model_combo.currentTextChanged.connect(self._sync_case)
+        self.turbulence_wall_treatment_combo.currentTextChanged.connect(
+            self._sync_case
+        )
         self.set_case(self._case)
         self._update_viscosity_controls()
+        self._update_turbulence_controls()
 
     def _combo(self, values: tuple[str, ...]) -> QComboBox:
         combo = QComboBox(self)
@@ -205,6 +231,10 @@ class NumericsPanel(QWidget):
         self.prandtl_number_spin.setValue(settings.prandtl_number)
         self.acceleration_x_spin.setValue(settings.acceleration_x)
         self.acceleration_y_spin.setValue(settings.acceleration_y)
+        self.turbulence_model_combo.setCurrentText(settings.turbulence_model)
+        self.turbulence_wall_treatment_combo.setCurrentText(
+            settings.turbulence_wall_treatment
+        )
         for control in self._controls:
             control.blockSignals(False)
         self._update_viscosity_controls()
@@ -233,6 +263,10 @@ class NumericsPanel(QWidget):
         settings.prandtl_number = self.prandtl_number_spin.value()
         settings.acceleration_x = self.acceleration_x_spin.value()
         settings.acceleration_y = self.acceleration_y_spin.value()
+        settings.turbulence_model = self.turbulence_model_combo.currentText()
+        settings.turbulence_wall_treatment = (
+            self.turbulence_wall_treatment_combo.currentText()
+        )
         self.changed.emit()
 
     def _update_viscosity_controls(self, *_args) -> None:
@@ -247,3 +281,10 @@ class NumericsPanel(QWidget):
             label = self.layout().labelForField(control)
             if label is not None:
                 label.setVisible(visible)
+
+    def _update_turbulence_controls(self, *_args) -> None:
+        visible = self.turbulence_model_combo.currentText() != "None"
+        self.turbulence_wall_treatment_combo.setVisible(visible)
+        label = self.layout().labelForField(self.turbulence_wall_treatment_combo)
+        if label is not None:
+            label.setVisible(visible)

@@ -99,6 +99,17 @@ components are constant throughout the domain in m/s² and contribute both
 ρf to momentum and ρf·u to total energy. Diffusive explicit stability limits
 are included in the solver time step.
 
+The optional Menter k-omega SST model requires Constant or Sutherland
+molecular viscosity. Set the base turbulent kinetic energy `k` in m²/s² and
+specific dissipation rate `omega` in 1/s under Initial Conditions. For
+Velocity Inlet, Pressure Inlet, Mass Flow Inlet, and Far Field boundaries,
+specify turbulence intensity in percent and a turbulence length scale in
+metres; the solver derives `k` and `omega` from those values and the boundary
+flow speed. No-slip walls support either wall-resolved SST (use a mesh that
+resolves the viscous near-wall region) or equilibrium logarithmic wall
+functions. The model includes turbulent stress and heat transport in the
+momentum and energy equations; turbulent Prandtl number is fixed at 0.9.
+
 ### Isentropic Euler vortex test
 
 For a nondimensional vortex on a `[0, 10] x [0, 10]` domain, pair the opposing

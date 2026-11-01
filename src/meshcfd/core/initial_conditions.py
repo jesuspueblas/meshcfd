@@ -39,6 +39,8 @@ def evaluate_initial_conditions(
                     field: expression.evaluate(x, y)
                     for field, expression in fields.items()
                 }
+                values["turbulence_k"] = settings.base_state.turbulence_k
+                values["turbulence_omega"] = settings.base_state.turbulence_omega
                 state = InitialState(**values)
                 _validate_state(state)
             except ValueError as error:
@@ -74,7 +76,14 @@ def _cell_centroid(
 
 
 def _validate_state(state: InitialState) -> None:
-    values = (state.density, state.velocity_x, state.velocity_y, state.pressure)
+    values = (
+        state.density,
+        state.velocity_x,
+        state.velocity_y,
+        state.pressure,
+        state.turbulence_k,
+        state.turbulence_omega,
+    )
     try:
         finite = all(math.isfinite(value) for value in values)
     except OverflowError:
@@ -83,3 +92,5 @@ def _validate_state(state: InitialState) -> None:
         raise ValueError("Initial-state values must be finite.")
     if state.density <= 0.0 or state.pressure <= 0.0:
         raise ValueError("Initial density and pressure must be positive.")
+    if state.turbulence_k < 0.0 or state.turbulence_omega <= 0.0:
+        raise ValueError("Initial turbulence k must be non-negative and omega positive.")
