@@ -59,5 +59,7 @@ gui (PyQt5)         io (JSON)
 
 The solver handles transient inviscid ideal-gas Euler flow with periodic,
 slip-wall, symmetry, velocity-inlet, pressure-outlet, and characteristic
-far-field boundaries. Pressure-inlet and MUSCL-parabolic options are not yet
-supported by the solver and produce explicit errors if selected.
+far-field boundaries. MUSCL parabolic uses a limited quadratic reconstruction
+over a two-ring stencil, falling back to linear reconstruction when the local
+stencil is rank-deficient. Pressure-inlet boundaries are not yet supported and
+produce explicit errors if selected.

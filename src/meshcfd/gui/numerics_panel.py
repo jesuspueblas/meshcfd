@@ -31,10 +31,8 @@ class NumericsPanel(QWidget):
         form.setRowWrapPolicy(QFormLayout.WrapLongRows)
 
         self.reconstruction_combo = self._combo(RECONSTRUCTION_SCHEMES)
-        parabolic_index = self.reconstruction_combo.findText("MUSCL parabolic")
-        self.reconstruction_combo.model().item(parabolic_index).setEnabled(False)
         self.reconstruction_combo.setToolTip(
-            "MUSCL parabolic is reserved for a future solver version."
+            "MUSCL parabolic uses a limited quadratic fit over a two-cell stencil."
         )
         self.limiter_combo = self._combo(LIMITER_SCHEMES)
         self.flux_combo = self._combo(FLUX_SCHEMES)

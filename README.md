@@ -13,7 +13,8 @@ The current version provides:
   and pitch detection along the x or y axis.
 - Transient finite-volume integration of the 2D ideal-gas Euler equations,
   with Rusanov, HLLC, and Roe fluxes; explicit Euler, RK2, and RK3; and
-  first-order or limited MUSCL-linear reconstruction.
+  first-order, limited MUSCL-linear, and limited quadratic MUSCL-parabolic
+  reconstruction.
 - A bottom Output dock that records application messages and per-step time-step
   and conservative residual history. Live mesh-solution updates can be enabled
   in Numerical Setup; they are off by default and refresh every ten steps.
@@ -59,10 +60,12 @@ outlet extrapolates density and velocity from the interior and imposes the
 configured static pressure. Far-field boundaries use density, velocity
 components, and pressure with characteristic treatment for subsonic flow and
 the appropriate interior or freestream state for supersonic outflow or inflow.
-Pressure inlet and the selectable MUSCL-parabolic reconstruction are not
-implemented and are reported as solver errors. Runs stop at the configured
-End time or maximum time-step count; the residual is reported for monitoring
-and does not terminate an unsteady run.
+Pressure inlet is not implemented and is reported as a solver error. MUSCL
+parabolic fits a quadratic polynomial over the two-ring cell stencil and limits
+face values to the local stencil range; cells without a full-rank stencil use
+the linear reconstruction. Runs stop at the configured End time or maximum
+time-step count; the residual is reported for monitoring and does not terminate
+an unsteady run.
 
 ### Isentropic Euler vortex test
 

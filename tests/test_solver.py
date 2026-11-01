@@ -18,7 +18,9 @@ from meshcfd.core.model import (
 from meshcfd.core.solver import (
     SolverError,
     SolverProgress,
+    _build_geometry,
     _far_field_boundary_states,
+    _parabolic_reconstruction,
     solve_case,
 )
 
@@ -160,10 +162,16 @@ def test_uniform_periodic_flow_is_preserved(flux, integrator):
 @pytest.mark.parametrize(
     "integrator", ("Explicit Euler", "Explicit RK2", "Explicit RK3")
 )
-def test_periodic_solver_conserves_integrated_euler_state(flux, integrator):
+@pytest.mark.parametrize(
+    "reconstruction", ("First order", "MUSCL linear", "MUSCL parabolic")
+)
+def test_periodic_solver_conserves_integrated_euler_state(
+    flux, integrator, reconstruction
+):
     case = make_periodic_case(4, 3)
     case.numerics.flux = flux
     case.numerics.time_integration = integrator
+    case.numerics.reconstruction = reconstruction
     case.numerics.end_time = 0.01
     initial = tuple(
         InitialState(
@@ -207,6 +215,39 @@ def test_periodic_solver_conserves_integrated_euler_state(flux, integrator):
         rtol=1e-11,
         atol=1e-11,
     )
+
+
+def test_parabolic_reconstruction_recovers_quadratic_field():
+    case = make_periodic_case(6, 6)
+    geometry = _build_geometry(case.mesh, case)
+    primitive = np.array(
+        [
+            (
+                10.0 + x * x + 2.0 * x * y + 3.0 * y * y,
+                0.2,
+                -0.1,
+                1.0,
+            )
+            for x, y in geometry.centers
+        ]
+    )
+
+    gradients, curvature, factors = _parabolic_reconstruction(
+        primitive, geometry, "Barth-Jespersen"
+    )
+
+    cell_id = 3 * 6 + 3
+    x, y = geometry.centers[cell_id]
+    np.testing.assert_allclose(
+        gradients[cell_id, 0],
+        (2.0 * x + 2.0 * y, 2.0 * x + 6.0 * y),
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        curvature[cell_id, 0], (2.0, 2.0, 6.0), rtol=1e-10, atol=1e-10
+    )
+    assert factors[cell_id, 0] == pytest.approx(1.0)
 
 
 @pytest.mark.parametrize("flux", ("Rusanov", "HLLC", "Roe"))
@@ -365,8 +406,9 @@ def test_solver_reports_iteration_limit_and_rejects_unsupported_choices():
     assert result.time < case.numerics.end_time
 
     case.numerics.reconstruction = "MUSCL parabolic"
-    with pytest.raises(SolverError, match="not implemented"):
-        solve_case(case, (InitialState(),))
+    parabolic_result = solve_case(case, (InitialState(1.0, 0.1, 0.0, 1.0),))
+    assert not parabolic_result.completed
+    assert parabolic_result.steps == 1
 
 
 def test_solver_continues_from_previous_time_and_step_count():
@@ -439,7 +481,8 @@ def test_solver_progress_omits_states_when_live_updates_are_disabled():
     assert all(item.states is None for item in progress)
 
 
-def test_isentropic_euler_vortex_runs_for_one_period():
+@pytest.mark.parametrize("reconstruction", ("MUSCL linear", "MUSCL parabolic"))
+def test_isentropic_euler_vortex_runs_for_one_period(reconstruction):
     gamma = 1.4
     beta = 5.0
     freestream_x = 1.0
@@ -449,7 +492,7 @@ def test_isentropic_euler_vortex_runs_for_one_period():
     case = make_periodic_case(10, 10, 10.0, 10.0)
     case.numerics.flux = "HLLC"
     case.numerics.time_integration = "Explicit RK3"
-    case.numerics.reconstruction = "MUSCL linear"
+    case.numerics.reconstruction = reconstruction
     case.numerics.limiter = "Barth-Jespersen"
     case.numerics.cfl = 0.4
     case.numerics.end_time = 10.0

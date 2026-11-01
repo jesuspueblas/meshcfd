@@ -70,6 +70,10 @@ class _Geometry:
     gradient_neighbours: np.ndarray
     gradient_dx: np.ndarray
     gradient_dy: np.ndarray
+    parabolic_sources: np.ndarray
+    parabolic_neighbours: np.ndarray
+    parabolic_dx: np.ndarray
+    parabolic_dy: np.ndarray
     limiter_cells: np.ndarray
     limiter_dx: np.ndarray
     limiter_dy: np.ndarray
@@ -88,12 +92,11 @@ def solve_case(
     if case.mesh is None:
         raise SolverError("Import a mesh before running the solver.")
     settings = case.numerics
-    if settings.reconstruction == "MUSCL parabolic":
-        raise SolverError(
-            "MUSCL parabolic reconstruction is not implemented; select First order "
-            "or MUSCL linear."
-        )
-    if settings.reconstruction not in ("First order", "MUSCL linear"):
+    if settings.reconstruction not in (
+        "First order",
+        "MUSCL linear",
+        "MUSCL parabolic",
+    ):
         raise SolverError(f"Unsupported reconstruction '{settings.reconstruction}'.")
     if settings.limiter not in (
         "Barth-Jespersen",
@@ -468,6 +471,23 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
         gradient_neighbours.extend((owner_b, owner_a))
         gradient_dx.extend((delta[0], -delta[0]))
         gradient_dy.extend((delta[1], -delta[1]))
+    (
+        parabolic_sources,
+        parabolic_neighbours,
+        parabolic_dx,
+        parabolic_dy,
+    ) = _parabolic_stencil(
+        len(mesh.cells),
+        gradient_sources,
+        gradient_neighbours,
+        gradient_dx,
+        gradient_dy,
+        max(
+            max(x for x, _ in mesh.points) - min(x for x, _ in mesh.points),
+            max(y for _, y in mesh.points) - min(y for _, y in mesh.points),
+            1e-12,
+        ),
+    )
 
     limiter_cells = list(owners)
     limiter_dx = list(np.asarray(face_centers)[:, 0] - centers[owners, 0])
@@ -506,9 +526,66 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
         gradient_neighbours=np.asarray(gradient_neighbours, dtype=int),
         gradient_dx=np.asarray(gradient_dx, dtype=float),
         gradient_dy=np.asarray(gradient_dy, dtype=float),
+        parabolic_sources=parabolic_sources,
+        parabolic_neighbours=parabolic_neighbours,
+        parabolic_dx=parabolic_dx,
+        parabolic_dy=parabolic_dy,
         limiter_cells=np.asarray(limiter_cells, dtype=int),
         limiter_dx=np.asarray(limiter_dx, dtype=float),
         limiter_dy=np.asarray(limiter_dy, dtype=float),
+    )
+
+
+def _parabolic_stencil(
+    cell_count: int,
+    sources: list[int],
+    neighbours: list[int],
+    dx: list[float],
+    dy: list[float],
+    domain_scale: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    adjacency: list[list[tuple[int, float, float]]] = [
+        [] for _ in range(cell_count)
+    ]
+    for source, neighbour, delta_x, delta_y in zip(
+        sources, neighbours, dx, dy
+    ):
+        adjacency[source].append((neighbour, delta_x, delta_y))
+
+    stencil_sources = []
+    stencil_neighbours = []
+    stencil_dx = []
+    stencil_dy = []
+    for source in range(cell_count):
+        frontier = [(source, 0.0, 0.0)]
+        seen = {(source, 0, 0)}
+        for _depth in range(2):
+            next_frontier = []
+            for current, offset_x, offset_y in frontier:
+                for neighbour, edge_x, edge_y in adjacency[current]:
+                    position_x = offset_x + edge_x
+                    position_y = offset_y + edge_y
+                    key = (
+                        neighbour,
+                        round(position_x / domain_scale, 10),
+                        round(position_y / domain_scale, 10),
+                    )
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    next_frontier.append((neighbour, position_x, position_y))
+                    if math.hypot(position_x, position_y) > domain_scale * 1e-12:
+                        stencil_sources.append(source)
+                        stencil_neighbours.append(neighbour)
+                        stencil_dx.append(position_x)
+                        stencil_dy.append(position_y)
+            frontier = next_frontier
+
+    return (
+        np.asarray(stencil_sources, dtype=int),
+        np.asarray(stencil_neighbours, dtype=int),
+        np.asarray(stencil_dx, dtype=float),
+        np.asarray(stencil_dy, dtype=float),
     )
 
 
@@ -581,14 +658,118 @@ def _limited_gradients(
     return gradients, factors
 
 
+def _parabolic_reconstruction(
+    primitive: np.ndarray, geometry: _Geometry, limiter: str
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    gradients, factors = _limited_gradients(primitive, geometry, limiter)
+    cell_count = len(primitive)
+    curvature = np.zeros((cell_count, 4, 3), dtype=float)
+    sources = geometry.parabolic_sources
+    if len(sources) == 0:
+        return gradients, curvature, factors
+
+    dx, dy = geometry.parabolic_dx, geometry.parabolic_dy
+    scales = np.zeros(cell_count, dtype=float)
+    np.maximum.at(scales, sources, np.maximum(np.abs(dx), np.abs(dy)))
+    scales = np.maximum(scales, 1e-300)
+    normalized_x = dx / scales[sources]
+    normalized_y = dy / scales[sources]
+    design = np.column_stack(
+        (
+            normalized_x,
+            normalized_y,
+            0.5 * normalized_x**2,
+            normalized_x * normalized_y,
+            0.5 * normalized_y**2,
+        )
+    )
+    weights = 1.0 / np.maximum(normalized_x**2 + normalized_y**2, 1e-300)
+    normal_matrix = np.zeros((cell_count, 5, 5), dtype=float)
+    right_hand_side = np.zeros((cell_count, 5, 4), dtype=float)
+    np.add.at(
+        normal_matrix,
+        sources,
+        weights[:, None, None] * design[:, :, None] * design[:, None, :],
+    )
+    differences = primitive[geometry.parabolic_neighbours] - primitive[sources]
+    np.add.at(
+        right_hand_side,
+        sources,
+        weights[:, None, None] * design[:, :, None] * differences[:, None, :],
+    )
+    full_rank = np.linalg.matrix_rank(normal_matrix) == 5
+    if not np.any(full_rank):
+        return gradients, curvature, factors
+    coefficients = np.linalg.solve(
+        normal_matrix[full_rank], right_hand_side[full_rank]
+    )
+    cell_scales = scales[full_rank, None]
+    gradients[full_rank, :, 0] = coefficients[:, 0, :] / cell_scales
+    gradients[full_rank, :, 1] = coefficients[:, 1, :] / cell_scales
+    curvature[full_rank, :, 0] = coefficients[:, 2, :] / cell_scales**2
+    curvature[full_rank, :, 1] = coefficients[:, 3, :] / cell_scales**2
+    curvature[full_rank, :, 2] = coefficients[:, 4, :] / cell_scales**2
+
+    local_min = primitive.copy()
+    local_max = primitive.copy()
+    np.minimum.at(
+        local_min, sources, primitive[geometry.parabolic_neighbours]
+    )
+    np.maximum.at(
+        local_max, sources, primitive[geometry.parabolic_neighbours]
+    )
+    cells = geometry.limiter_cells
+    face_dx, face_dy = geometry.limiter_dx, geometry.limiter_dy
+    increments = (
+        gradients[cells, :, 0] * face_dx[:, None]
+        + gradients[cells, :, 1] * face_dy[:, None]
+        + 0.5 * curvature[cells, :, 0] * face_dx[:, None] ** 2
+        + curvature[cells, :, 1] * (face_dx * face_dy)[:, None]
+        + 0.5 * curvature[cells, :, 2] * face_dy[:, None] ** 2
+    )
+    cell_values = primitive[cells]
+    positive = increments > 1e-14 * np.maximum(np.abs(cell_values), 1.0)
+    negative = increments < -1e-14 * np.maximum(np.abs(cell_values), 1.0)
+    ratio = np.ones_like(increments)
+    upper = np.broadcast_to(local_max[cells] - cell_values, increments.shape)
+    lower = np.broadcast_to(local_min[cells] - cell_values, increments.shape)
+    np.divide(upper, increments, out=ratio, where=positive)
+    np.divide(lower, increments, out=ratio, where=negative)
+    ratio = np.maximum(ratio, 0.0)
+    if limiter in ("Barth-Jespersen", "Minmod"):
+        face_limiter = np.minimum(ratio, 1.0)
+    elif limiter == "Van Leer":
+        face_limiter = np.where(
+            ratio > 0.0, np.minimum(1.0, 2.0 * ratio / (1.0 + ratio)), 0.0
+        )
+    else:
+        epsilon = 1e-12
+        face_limiter = (
+            ratio**2 + 2.0 * ratio + epsilon
+        ) / (ratio**2 + ratio + 2.0 + epsilon)
+        face_limiter = np.minimum(face_limiter, 1.0)
+    parabolic_factors = np.ones((cell_count, 4), dtype=float)
+    np.minimum.at(parabolic_factors, cells, face_limiter)
+    factors[full_rank] = parabolic_factors[full_rank]
+    return gradients, curvature, factors
+
+
 def _reconstruct(
     primitive: np.ndarray,
     gradients: np.ndarray,
     factors: np.ndarray,
     cell_ids: np.ndarray,
     offsets: np.ndarray,
+    curvature: np.ndarray | None = None,
 ) -> np.ndarray:
     increments = np.sum(gradients[cell_ids] * offsets[:, None, :], axis=2)
+    if curvature is not None:
+        dx, dy = offsets[:, 0], offsets[:, 1]
+        increments += (
+            0.5 * curvature[cell_ids, :, 0] * dx[:, None] ** 2
+            + curvature[cell_ids, :, 1] * (dx * dy)[:, None]
+            + 0.5 * curvature[cell_ids, :, 2] * dy[:, None] ** 2
+        )
     return primitive[cell_ids] + factors[cell_ids] * increments
 
 
@@ -601,22 +782,33 @@ def _residual(
     limiter: str,
 ) -> np.ndarray:
     primitive = conservative_to_primitive(conservative, gamma)
-    if reconstruction == "MUSCL linear":
+    curvature = None
+    if reconstruction == "MUSCL parabolic":
+        gradients, curvature, factors = _parabolic_reconstruction(
+            primitive, geometry, limiter
+        )
+    elif reconstruction == "MUSCL linear":
         gradients, factors = _limited_gradients(primitive, geometry, limiter)
     else:
         gradients = np.zeros((len(primitive), 4, 2))
         factors = np.ones((len(primitive), 4))
+
+    def reconstruct(cell_ids: np.ndarray, offsets: np.ndarray) -> np.ndarray:
+        return _reconstruct(
+            primitive, gradients, factors, cell_ids, offsets, curvature
+        )
+
     derivative = np.zeros_like(conservative)
     if len(geometry.interior_faces):
         faces = geometry.interior_faces
         owners = geometry.owners[faces]
         neighbours = geometry.neighbours[faces]
-        left = _reconstruct(
-            primitive, gradients, factors, owners,
+        left = reconstruct(
+            owners,
             geometry.face_centers[faces] - geometry.centers[owners],
         )
-        right = _reconstruct(
-            primitive, gradients, factors, neighbours,
+        right = reconstruct(
+            neighbours,
             geometry.face_centers[faces] - geometry.centers[neighbours],
         )
         flux = numerical_flux(
@@ -630,12 +822,12 @@ def _residual(
     if len(geometry.periodic_faces_a):
         faces_a, faces_b = geometry.periodic_faces_a, geometry.periodic_faces_b
         owners_a, owners_b = geometry.owners[faces_a], geometry.owners[faces_b]
-        left = _reconstruct(
-            primitive, gradients, factors, owners_a,
+        left = reconstruct(
+            owners_a,
             geometry.face_centers[faces_a] - geometry.centers[owners_a],
         )
-        right = _reconstruct(
-            primitive, gradients, factors, owners_b,
+        right = reconstruct(
+            owners_b,
             geometry.face_centers[faces_b] - geometry.centers[owners_b],
         )
         flux = numerical_flux(
@@ -651,8 +843,8 @@ def _residual(
     if len(geometry.wall_faces):
         faces = geometry.wall_faces
         owners = geometry.owners[faces]
-        left = _reconstruct(
-            primitive, gradients, factors, owners,
+        left = reconstruct(
+            owners,
             geometry.face_centers[faces] - geometry.centers[owners],
         )
         right = left.copy()
@@ -668,10 +860,7 @@ def _residual(
     if len(geometry.velocity_inlet_faces):
         faces = geometry.velocity_inlet_faces
         owners = geometry.owners[faces]
-        interior = _reconstruct(
-            primitive,
-            gradients,
-            factors,
+        interior = reconstruct(
             owners,
             geometry.face_centers[faces] - geometry.centers[owners],
         )
@@ -684,10 +873,7 @@ def _residual(
     if len(geometry.pressure_outlet_faces):
         faces = geometry.pressure_outlet_faces
         owners = geometry.owners[faces]
-        interior = _reconstruct(
-            primitive,
-            gradients,
-            factors,
+        interior = reconstruct(
             owners,
             geometry.face_centers[faces] - geometry.centers[owners],
         )
@@ -701,10 +887,7 @@ def _residual(
     if len(geometry.far_field_faces):
         faces = geometry.far_field_faces
         owners = geometry.owners[faces]
-        interior = _reconstruct(
-            primitive,
-            gradients,
-            factors,
+        interior = reconstruct(
             owners,
             geometry.face_centers[faces] - geometry.centers[owners],
         )

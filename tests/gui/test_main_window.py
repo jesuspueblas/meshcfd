@@ -91,6 +91,17 @@ def test_boundary_and_numerical_controls_update_case(qtbot):
     assert window.canvas.selected_patch_id == 2
 
 
+def test_muscl_parabolic_reconstruction_is_available(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    combo = window.numerics_panel.reconstruction_combo
+    combo.setCurrentText("MUSCL parabolic")
+
+    assert combo.currentText() == "MUSCL parabolic"
+    assert window.case.numerics.reconstruction == "MUSCL parabolic"
+
+
 def test_far_field_boundary_uses_density_velocity_and_pressure_controls(qtbot):
     window = MainWindow()
     qtbot.addWidget(window)
