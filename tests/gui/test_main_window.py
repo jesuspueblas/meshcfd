@@ -1,9 +1,11 @@
 import json
+from threading import Event
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QMessageBox
 
-from meshcfd.core.model import Case
+from meshcfd.core.model import Case, InitialState
+from meshcfd.core.solver import SolverResult
 from meshcfd.gui.main_window import MainWindow
 from meshcfd.io.mesh_io import mesh_from_dict, mesh_to_dict
 from meshcfd.io.project_io import load_case, save_case
@@ -50,6 +52,76 @@ def test_main_window_initial_state(qtbot):
     assert window.output_terminal.isReadOnly()
     assert "MeshCFD ready" in window.output_terminal.toPlainText()
     assert window.action_run.text() == "Run Solver"
+    assert window.action_stop.text() == "Stop Solver"
+    assert not window.action_stop.isEnabled()
+
+
+def test_run_pauses_and_stop_preserves_state_for_updated_settings(qtbot, monkeypatch):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    monkeypatch.setattr(
+        "meshcfd.gui.main_window.QMessageBox.critical", lambda *_args: None
+    )
+    case = Case()
+    case.set_mesh(make_mesh())
+    case.numerics.end_time = 1.0
+    window._set_case(case, None)
+    started = Event()
+    calls = []
+    partial_state = InitialState(1.05, 0.1, 0.0, 1.0)
+
+    def fake_solve_case(
+        run_case,
+        initial_states,
+        _progress_callback,
+        cancel_callback,
+        _live_solution_updates,
+        start_time,
+        step_offset,
+        pause_callback,
+    ):
+        calls.append((run_case, tuple(initial_states), start_time, step_offset))
+        if len(calls) == 1:
+            started.set()
+            while not cancel_callback():
+                pause_callback()
+                Event().wait(0.001)
+            return SolverResult((partial_state,), 0.25, 4, 0.5, False)
+        return SolverResult(
+            tuple(initial_states), start_time + 0.1, step_offset + 1, 0.0, False
+        )
+
+    monkeypatch.setattr("meshcfd.gui.main_window.solve_case", fake_solve_case)
+    window._on_run()
+    try:
+        assert started.wait(timeout=5.0)
+        assert window.action_run.text() == "Pause Solver"
+        assert window.action_stop.isEnabled()
+        window.action_run.trigger()
+        qtbot.waitUntil(
+            lambda: window.status_label.text() == "Solver paused.", timeout=5000
+        )
+        assert window.action_run.text() == "Resume Solver"
+        window.numerics_panel.end_time_spin.setValue(2.0)
+        window.action_stop.trigger()
+        qtbot.waitUntil(lambda: window._solver_worker is None, timeout=5000)
+    finally:
+        if window._solver_worker is not None:
+            window._solver_worker.stop()
+
+    assert window.case.final_solution == (partial_state,)
+    assert window.case.solution_time == 0.25
+    assert window.case.solution_steps == 4
+    assert window.action_run.text() == "Run Solver"
+    assert not window.action_stop.isEnabled()
+
+    window.action_run.trigger()
+    qtbot.waitUntil(lambda: window._solver_worker is None, timeout=5000)
+    resumed_case, resumed_states, start_time, step_offset = calls[1]
+    assert resumed_case.numerics.end_time == 2.0
+    assert resumed_states == (partial_state,)
+    assert start_time == 0.25
+    assert step_offset == 4
 
 
 def test_output_dock_layout_preserves_canvas_width(qtbot):

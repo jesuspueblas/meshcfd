@@ -1,4 +1,5 @@
 import math
+from threading import Event, Thread
 
 import numpy as np
 import pytest
@@ -29,6 +30,7 @@ from meshcfd.core.solver import (
     _sst_fields,
     _turbulence_boundary_values,
     _viscous_flux,
+    derive_solution_fields,
     solve_case,
 )
 
@@ -227,6 +229,58 @@ def test_sst_inlet_values_come_from_intensity_and_length_scale():
     assert boundary_values[1][1] == pytest.approx(
         math.sqrt(expected_k) / (0.09**0.25 * 0.5)
     )
+
+
+def test_derived_stagnation_fields_and_mach_number():
+    case = make_periodic_case()
+    case.numerics.gas_constant = 1.0
+    case.numerics.gamma = 1.4
+    velocity = math.sqrt(1.4)
+
+    fields = derive_solution_fields(
+        case, (InitialState(1.0, velocity, 0.0, 1.0),)
+    )
+
+    total_factor = 1.2
+    assert fields["mach_number"][0] == pytest.approx(1.0)
+    assert fields["total_temperature"][0] == pytest.approx(total_factor)
+    assert fields["total_pressure"][0] == pytest.approx(total_factor**3.5)
+    assert fields["total_density"][0] == pytest.approx(total_factor**2.5)
+
+
+def test_y_plus_uses_nearest_no_slip_wall_and_molecular_viscosity():
+    case = make_periodic_case()
+    case.periodic_pairs.clear()
+    for boundary in case.boundary_conditions:
+        boundary.kind = "Wall"
+        boundary.mechanical_condition = "No-slip"
+    case.numerics.viscosity_model = "Constant"
+    case.numerics.dynamic_viscosity = 1e-3
+
+    fields = derive_solution_fields(
+        case, (InitialState(1.0, 2.0, 0.0, 1.0),)
+    )
+
+    assert fields["y_plus"][0] == pytest.approx(math.sqrt(1000.0))
+
+
+def test_y_plus_is_reported_only_for_cells_touching_a_no_slip_wall():
+    case = make_periodic_case(3, 3)
+    case.periodic_pairs.clear()
+    for boundary in case.boundary_conditions:
+        boundary.kind = "Wall"
+        boundary.mechanical_condition = "No-slip"
+    case.numerics.viscosity_model = "Constant"
+    case.numerics.dynamic_viscosity = 1e-3
+    states = tuple(
+        InitialState(1.0, 1.0, 0.0, 1.0)
+        for _cell in case.mesh.cells
+    )
+
+    fields = derive_solution_fields(case, states)
+
+    assert fields["y_plus"][4] == 0.0
+    assert fields["y_plus"][1] > 0.0
 
 
 def test_wall_heat_flux_positive_into_fluid_adds_energy():
@@ -780,6 +834,47 @@ def test_solver_continues_from_previous_time_and_step_count():
     assert second.steps == first.steps + 1
     assert progress[0].step == second.steps
     assert progress[0].time > first.time
+
+
+def test_solver_pause_callback_waits_at_step_boundary_and_resumes():
+    case = make_periodic_case()
+    case.numerics.end_time = 10.0
+    case.numerics.max_iterations = 2
+    pause_reached = Event()
+    resume = Event()
+    result_box = {}
+    errors = []
+    callback_count = 0
+
+    def pause_callback():
+        nonlocal callback_count
+        callback_count += 1
+        if callback_count == 2:
+            pause_reached.set()
+            if not resume.wait(timeout=5.0):
+                raise TimeoutError("Test did not resume the solver.")
+
+    def run_solver():
+        try:
+            result_box["result"] = solve_case(
+                case,
+                (InitialState(1.0, 0.1, 0.0, 1.0),),
+                pause_callback=pause_callback,
+            )
+        except Exception as error:
+            errors.append(error)
+
+    thread = Thread(target=run_solver)
+    thread.start()
+
+    assert pause_reached.wait(timeout=5.0)
+    assert "result" not in result_box
+    resume.set()
+    thread.join(timeout=5.0)
+
+    assert not thread.is_alive()
+    assert not errors
+    assert result_box["result"].steps == 2
 
 
 def test_solver_rejects_end_time_not_after_current_time():

@@ -110,6 +110,36 @@ def test_sst_fields_can_be_visualized(qtbot, variable, expected):
     assert values == (expected,)
 
 
+@pytest.mark.parametrize(
+    ("variable", "field", "expected"),
+    (
+        ("Mach number", "mach_number", 0.8),
+        ("Total pressure", "total_pressure", 120000.0),
+        ("Total temperature", "total_temperature", 320.0),
+        ("Total density", "total_density", 1.25),
+        ("y+ (wall distance)", "y_plus", 25.0),
+    ),
+)
+def test_derived_flow_fields_can_be_visualized(qtbot, variable, field, expected):
+    canvas = MeshCanvas()
+    qtbot.addWidget(canvas)
+    canvas.set_mesh(make_mesh())
+    canvas.set_solution(
+        (InitialState(),),
+        {field: (expected,)},
+    )
+
+    values = canvas.set_display_options(
+        show_grid=True,
+        show_mesh=True,
+        solution_variable=variable,
+        color_map="Viridis",
+        color_scale="Linear",
+    )
+
+    assert values == (expected,)
+
+
 def test_logarithmic_color_scale_rejects_non_positive_values(qtbot):
     canvas = MeshCanvas()
     qtbot.addWidget(canvas)
@@ -360,6 +390,36 @@ def test_cell_info_reports_zero_based_index_centroid_and_active_field(qtbot):
     )
 
     assert selected == [(0, 0.5, 0.5, "Density", 1.0)]
+
+
+def test_cell_info_reports_derived_solution_field(qtbot):
+    canvas = MeshCanvas()
+    qtbot.addWidget(canvas)
+    canvas.resize(500, 400)
+    canvas.set_mesh(make_two_cell_mesh())
+    canvas.set_solution(
+        (InitialState(), InitialState()),
+        {"mach_number": (0.25, 0.75)},
+    )
+    canvas.set_display_options(
+        show_grid=False,
+        show_mesh=True,
+        solution_variable="Mach number",
+        color_map="Viridis",
+        color_scale="Linear",
+    )
+    canvas.show()
+    qtbot.waitExposed(canvas)
+    canvas.reset_zoom()
+    selected = []
+    canvas.cell_selected.connect(lambda *details: selected.append(details))
+    canvas.set_interaction_mode("Cell Info")
+    position = canvas.mapFromScene(QPointF(0.25, 0.5))
+    send_canvas_mouse_event(
+        canvas, QEvent.MouseButtonPress, position, Qt.LeftButton, Qt.LeftButton
+    )
+
+    assert selected == [(0, 0.5, 0.5, "Mach number", 0.25)]
 
 
 def test_solution_toolbar_layout_and_interactive_color_bar(qtbot):

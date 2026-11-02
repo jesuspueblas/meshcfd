@@ -6,6 +6,7 @@ import copy
 import sys
 from datetime import datetime
 from pathlib import Path
+from threading import Event
 
 from PyQt5.QtCore import QRect, QSize, Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QColor, QCursor, QIcon, QKeySequence, QPainter, QPen, QPixmap
@@ -27,7 +28,12 @@ from PyQt5.QtWidgets import (
 
 from meshcfd.core.initial_conditions import evaluate_initial_conditions
 from meshcfd.core.model import Case, InitialState
-from meshcfd.core.solver import SolverProgress, SolverResult, solve_case
+from meshcfd.core.solver import (
+    SolverProgress,
+    SolverResult,
+    derive_solution_fields,
+    solve_case,
+)
 from meshcfd.gui.boundary_panel import BoundaryPanel
 from meshcfd.gui.canvas import MeshCanvas
 from meshcfd.gui.initial_conditions_panel import InitialConditionsPanel
@@ -39,6 +45,7 @@ from meshcfd.io.project_io import load_case, save_case
 
 class _SolverWorker(QThread):
     progress = pyqtSignal(object)
+    pause_state_changed = pyqtSignal(bool)
 
     def __init__(
         self, case: Case, initial_states, live_solution_updates: bool
@@ -49,6 +56,9 @@ class _SolverWorker(QThread):
         self.live_solution_updates = live_solution_updates
         self.result: SolverResult | None = None
         self.error: str | None = None
+        self._resume_event = Event()
+        self._resume_event.set()
+        self._stop_requested = Event()
 
     def run(self) -> None:
         try:
@@ -60,9 +70,32 @@ class _SolverWorker(QThread):
                 self.live_solution_updates,
                 self.case.solution_time,
                 self.case.solution_steps,
+                self._pause_at_checkpoint,
             )
         except Exception as error:
             self.error = str(error)
+
+    def pause(self) -> None:
+        self._resume_event.clear()
+
+    def resume(self) -> None:
+        self._resume_event.set()
+
+    def stop(self) -> None:
+        self._stop_requested.set()
+        self.requestInterruption()
+        self.resume()
+
+    @property
+    def stop_requested(self) -> bool:
+        return self._stop_requested.is_set()
+
+    def _pause_at_checkpoint(self) -> None:
+        if self._resume_event.is_set():
+            return
+        self.pause_state_changed.emit(True)
+        self._resume_event.wait()
+        self.pause_state_changed.emit(False)
 
     def _report_progress(self, progress: SolverProgress) -> None:
         self.progress.emit(progress)
@@ -77,7 +110,9 @@ class MainWindow(QMainWindow):
         self._simulation_solution: tuple[InitialState, ...] | None = None
         self._case_revision = 0
         self._run_revision: int | None = None
+        self._run_case_ref: Case | None = None
         self._solver_worker: _SolverWorker | None = None
+        self._pause_requested = False
         self._live_solution_updates = False
         self._dirty = False
         self.resize(1400, 850)
@@ -148,6 +183,7 @@ class MainWindow(QMainWindow):
         self.boundary_panel.changed.connect(self._clear_simulation_solution)
         self.boundary_panel.patch_selected.connect(self.canvas.select_patch)
         self.numerics_panel.changed.connect(self._mark_dirty)
+        self.numerics_panel.changed.connect(self._update_visualization)
         self.numerics_panel.turbulence_model_combo.currentTextChanged.connect(
             self.boundary_panel.refresh_value_fields
         )
@@ -216,6 +252,10 @@ class MainWindow(QMainWindow):
         self.action_run = QAction("Run Solver", self)
         self.action_run.triggered.connect(self._on_run)
 
+        self.action_stop = QAction("Stop Solver", self)
+        self.action_stop.setEnabled(False)
+        self.action_stop.triggered.connect(self._on_stop)
+
         self.action_grid = QAction("Show Grid", self)
         self.action_grid.setCheckable(True)
         self.action_grid.setChecked(True)
@@ -234,6 +274,7 @@ class MainWindow(QMainWindow):
 
         simulation_menu = self.menuBar().addMenu("&Simulation")
         simulation_menu.addAction(self.action_run)
+        simulation_menu.addAction(self.action_stop)
 
         view_menu = self.menuBar().addMenu("&View")
         view_menu.addAction(self.action_grid)
@@ -283,6 +324,10 @@ class MainWindow(QMainWindow):
         self.action_run.setToolTip(self.action_run.text())
         self.action_run.setStatusTip(self.action_run.text())
         toolbar.addAction(self.action_run)
+        self.action_stop.setIcon(self.style().standardIcon(QStyle.SP_MediaStop))
+        self.action_stop.setToolTip(self.action_stop.text())
+        self.action_stop.setStatusTip(self.action_stop.text())
+        toolbar.addAction(self.action_stop)
         toolbar.addSeparator()
 
         self.visualization_toolbar = QToolBar("Solution View", self)
@@ -390,13 +435,17 @@ class MainWindow(QMainWindow):
     def _update_visualization(self, *_) -> None:
         variable = self.visualization_panel.variable_combo.currentText()
         palette = self.visualization_panel.palette_combo.currentText()
+        solution = self._simulation_solution or self._initial_solution
         self.canvas.set_interaction_mode(
             self.visualization_panel.interaction_mode
         )
-        self.canvas.set_solution(
-            self._simulation_solution or self._initial_solution
-        )
         try:
+            derived_fields = (
+                derive_solution_fields(self.case, solution)
+                if solution is not None
+                else {}
+            )
+            self.canvas.set_solution(solution, derived_fields)
             values = self.canvas.set_display_options(
                 show_grid=self.action_grid.isChecked(),
                 show_mesh=self.visualization_panel.show_mesh_checkbox.isChecked(),
@@ -578,26 +627,44 @@ class MainWindow(QMainWindow):
         )
 
     def _on_run(self) -> None:
+        if self._solver_worker is not None:
+            if self._pause_requested:
+                self._pause_requested = False
+                self._solver_worker.resume()
+                self._set_run_action("Pause Solver", QStyle.SP_MediaPause)
+                self.status_label.setText("Solver resuming...")
+                self._log_output("Resuming solver.")
+            else:
+                self._pause_requested = True
+                self._solver_worker.pause()
+                self._set_run_action("Resume Solver", QStyle.SP_MediaPlay)
+                self.status_label.setText("Pausing after the current time step...")
+                self._log_output(
+                    "Solver pause requested; waiting for the current time step."
+                )
+            return
         if self.case.mesh is None:
             self._log_output("Cannot start solver: no mesh is loaded.", "WARNING")
             QMessageBox.information(
                 self, "No Mesh", "Import a finite-volume mesh before setting up a run."
             )
             return
-        if self._solver_worker is not None:
-            return
         snapshot = copy.deepcopy(self.case)
         initial_states = copy.deepcopy(
             self._simulation_solution or self._initial_solution
         )
         self._run_revision = self._case_revision
+        self._run_case_ref = self.case
         worker = _SolverWorker(
             snapshot, initial_states, self._live_solution_updates
         )
         self._solver_worker = worker
         worker.progress.connect(self._on_solver_progress)
+        worker.pause_state_changed.connect(self._on_solver_pause_state_changed)
         worker.finished.connect(self._on_solver_finished)
-        self.action_run.setEnabled(False)
+        self._pause_requested = False
+        self._set_run_action("Pause Solver", QStyle.SP_MediaPause)
+        self.action_stop.setEnabled(True)
         self.status_label.setText("Solver running...")
         self.output_dock.show()
         self._log_output(
@@ -616,17 +683,46 @@ class MainWindow(QMainWindow):
         )
         worker.start()
 
+    def _set_run_action(self, text: str, icon: QStyle.StandardPixmap) -> None:
+        self.action_run.setText(text)
+        self.action_run.setToolTip(text)
+        self.action_run.setStatusTip(text)
+        self.action_run.setIcon(self.style().standardIcon(icon))
+
+    def _on_stop(self) -> None:
+        worker = self._solver_worker
+        if worker is None:
+            return
+        self.action_stop.setEnabled(False)
+        self.action_run.setEnabled(False)
+        self.status_label.setText("Stopping solver...")
+        self._log_output("Stopping solver after the current time step.")
+        worker.stop()
+
+    def _on_solver_pause_state_changed(self, paused: bool) -> None:
+        worker = self._solver_worker
+        if paused and worker is not None and not worker.stop_requested:
+            self.status_label.setText("Solver paused.")
+            self._log_output("Solver paused at a time-step boundary.")
+        elif (
+            worker is not None and not worker.stop_requested
+        ):
+            self.status_label.setText("Solver running...")
+            self._log_output("Solver resumed.")
+
     def _on_solver_progress(self, progress: SolverProgress) -> None:
         density, momentum_x, momentum_y, energy = progress.residuals
+        worker = self._solver_worker
         self._log_output(
             f"{progress.step:10d} {progress.time:12.5e} {progress.time_step:12.5e}"
             f" {density:12.5e} {momentum_x:12.5e} {momentum_y:12.5e}"
             f" {energy:12.5e}",
             "ITER",
         )
-        self.status_label.setText(
-            f"Solver running: step {progress.step}, t = {progress.time:.6g}"
-        )
+        if worker is not None and not worker.stop_requested:
+            self.status_label.setText(
+                f"Solver running: step {progress.step}, t = {progress.time:.6g}"
+            )
         if (
             progress.states is not None
             and self._run_revision == self._case_revision
@@ -638,15 +734,27 @@ class MainWindow(QMainWindow):
         worker = self._solver_worker
         if worker is None:
             return
+        stopped_with_current_mesh = (
+            worker.stop_requested
+            and self.case is self._run_case_ref
+            and self.case.mesh == worker.case.mesh
+        )
         self._solver_worker = None
+        self._pause_requested = False
+        self._run_case_ref = None
+        self._set_run_action("Run Solver", QStyle.SP_MediaPlay)
         self.action_run.setEnabled(True)
+        self.action_stop.setEnabled(False)
         worker.deleteLater()
         if worker.error is not None:
             self.status_label.setText("Solver failed.")
             self._log_output(f"Solver failed: {worker.error}", "ERROR")
             QMessageBox.critical(self, "Solver Error", worker.error)
             return
-        if self._run_revision != self._case_revision:
+        if (
+            self._run_revision != self._case_revision
+            and not stopped_with_current_mesh
+        ):
             self.status_label.setText(
                 "Run finished for older case settings; results were discarded."
             )
@@ -687,7 +795,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         if self._confirm_discard_changes():
             if self._solver_worker is not None:
-                self._solver_worker.requestInterruption()
+                self._solver_worker.stop()
                 self._solver_worker.wait()
             event.accept()
         else:

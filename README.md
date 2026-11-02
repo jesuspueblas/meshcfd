@@ -23,6 +23,8 @@ The current version provides:
 - Initial-solution preview by cell, with selectable variable, palette, and
   linear or logarithmic color scale, automatic or manually specified limits,
   clamping outside the selected range, and optional smooth coloring.
+- Visualization of Mach number, total (stagnation) pressure, temperature and
+  density, plus y+ at the first cell centers adjacent to no-slip walls.
 - Initial numerical controls for MUSCL reconstruction, limiters, fluxes, and
   time integration.
 - Optional laminar viscous stresses and Fourier heat conduction, using
@@ -34,6 +36,10 @@ The current version provides:
   run can be reopened and visualized without running the solver again.
 - Repeated runs continue from the current solution and accumulated simulation
   time. Increase the configured end time to continue after reaching it.
+- While a simulation is running, Run Solver toggles between Pause Solver and
+  Resume Solver. Stop Solver ends the run at the current time-step boundary and
+  keeps its partial solution. After stopping, setup changes apply to the next
+  run, which continues from that saved solution (provided the mesh is unchanged).
 
 Cases reference imported mesh files using a path relative to the case file.
 Keep the mesh file alongside the case when moving or sharing it.
@@ -109,6 +115,15 @@ flow speed. No-slip walls support either wall-resolved SST (use a mesh that
 resolves the viscous near-wall region) or equilibrium logarithmic wall
 functions. The model includes turbulent stress and heat transport in the
 momentum and energy equations; turbulent Prandtl number is fixed at 0.9.
+
+The solution viewer also offers Mach number and isentropic stagnation
+properties (total pressure, temperature, and density), computed from the local
+static state and velocity. The y+ field is evaluated at the first cell centers
+adjacent to no-slip walls using molecular viscosity; other cells are set to
+zero. These first-cell values are useful for checking near-wall resolution.
+For SST with wall functions, the friction velocity uses the solver's
+equilibrium log-law estimate; otherwise it uses the local linear wall shear
+estimate. y+ is not meaningful for inviscid or slip-wall cases.
 
 ### Isentropic Euler vortex test
 

@@ -125,7 +125,11 @@ class VisualizationPanel(QWidget):
         layout.addWidget(self.smooth_colors_checkbox)
         self._add_separator(layout)
 
-        self.variable_combo = self._combo(SOLUTION_VARIABLES, 105)
+        self.variable_combo = self._combo(SOLUTION_VARIABLES, 140)
+        self.variable_combo.setToolTip(
+            "Includes Mach number, stagnation properties, and y+ at the first "
+            "cell centers adjacent to no-slip walls."
+        )
         self.palette_combo = self._combo(COLOR_MAPS, 105)
         self.scale_combo = self._combo(("Linear", "Logarithmic"), 94)
         self._add_labeled_widget(layout, "Field", self.variable_combo)

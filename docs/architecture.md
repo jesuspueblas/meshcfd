@@ -18,6 +18,8 @@ gui (PyQt5)         io (JSON)
   and Roe numerical fluxes.
 - `meshcfd.core.solver` assembles conservative finite-volume residuals on
   polygonal cells and advances them with explicit Euler, SSP-RK2, or SSP-RK3.
+  Its step-boundary pause callback lets the GUI suspend and resume the same
+  solve without discarding its conservative state.
   Periodic partners share one conservative interface flux; walls and symmetry
   use reflected states. MUSCL-linear reconstruction supports the configured
   limiters. Optional viscous residuals add Stokes-hypothesis Newtonian stresses,
@@ -49,6 +51,10 @@ gui (PyQt5)         io (JSON)
   draws an adaptive coordinate-labeled grid and cell-centered or nodally
   interpolated solution colors. Manual limits clamp values to the palette
   endpoints, and logarithmic scales require positive limits and field values.
+  Derived fields include Mach number, isentropic stagnation pressure,
+  temperature and density, and y+ at the first cell centers adjacent to
+  no-slip walls (other cells are zero). y+ uses molecular viscosity and the
+  SST equilibrium friction-velocity estimate when wall functions are selected.
   An optional horizontal or vertical color legend overlays the plot and can be
   moved by dragging the legend and resized with its corner grip. Vertical
   legends show their numeric labels to the right of the color ramp and identify
@@ -69,7 +75,10 @@ gui (PyQt5)         io (JSON)
 - `meshcfd.gui.main_window` coordinates case actions, panels, and runs the
   solver on a background thread, displaying completed cell-centered fields
   and streaming iteration/residual logs to a bottom Output dock. Optional
-  live field updates are throttled to every ten steps. The latest solver
+  live field updates are throttled to every ten steps. Run Solver toggles to
+  pause/resume at time-step boundaries; Stop Solver interrupts at a boundary
+  and preserves the partial solution for a later run with updated settings
+  when the mesh is unchanged. The latest solver
   result and cumulative time-step count are stored in the case file and
   restored when reopening a solved case. Subsequent runs resume from that
   field and time; the configured end time remains an absolute target.

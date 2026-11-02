@@ -74,6 +74,11 @@ SOLUTION_VARIABLES = {
     "Pressure": "pressure",
     "Turbulent k": "turbulence_k",
     "Specific dissipation rate": "turbulence_omega",
+    "Mach number": "mach_number",
+    "Total pressure": "total_pressure",
+    "Total temperature": "total_temperature",
+    "Total density": "total_density",
+    "y+ (wall distance)": "y_plus",
 }
 
 
@@ -374,6 +379,7 @@ class MeshCanvas(QGraphicsView):
         self.mesh: FiniteVolumeMesh | None = None
         self.selected_patch_id: int | None = None
         self.solution: tuple[InitialState, ...] | None = None
+        self.derived_solution_fields: dict[str, tuple[float, ...]] = {}
         self.show_grid = True
         self.show_mesh = True
         self.solution_variable = "Density"
@@ -559,8 +565,13 @@ class MeshCanvas(QGraphicsView):
             Qt.CrossCursor if mode in ("Box Zoom", "Cell Info") else Qt.ArrowCursor
         )
 
-    def set_solution(self, solution: tuple[InitialState, ...] | None) -> None:
+    def set_solution(
+        self,
+        solution: tuple[InitialState, ...] | None,
+        derived_fields: dict[str, tuple[float, ...]] | None = None,
+    ) -> None:
         self.solution = solution
+        self.derived_solution_fields = derived_fields or {}
 
     def set_display_options(
         self,
@@ -605,6 +616,11 @@ class MeshCanvas(QGraphicsView):
         if len(self.solution) != len(self.mesh.cells):
             raise ValueError("Initial solution does not match the loaded mesh.")
         field = SOLUTION_VARIABLES[variable]
+        if field in self.derived_solution_fields:
+            values = self.derived_solution_fields[field]
+            if len(values) != len(self.mesh.cells):
+                raise ValueError("Derived solution field does not match the loaded mesh.")
+            return values
         return tuple(getattr(state, field) for state in self.solution)
 
     def select_patch(self, patch_id: int | None) -> None:
@@ -879,11 +895,8 @@ class MeshCanvas(QGraphicsView):
         if cell_id is None:
             return
         center_x, center_y = self._cell_centers[cell_id]
-        value = (
-            getattr(self.solution[cell_id], SOLUTION_VARIABLES[self.solution_variable])
-            if self.solution is not None
-            else None
-        )
+        values = self._solution_values(self.solution_variable)
+        value = values[cell_id] if values else None
         self.cell_selected.emit(
             cell_id, center_x, center_y, self.solution_variable, value
         )

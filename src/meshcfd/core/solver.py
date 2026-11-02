@@ -140,6 +140,7 @@ def solve_case(
     live_solution_updates: bool = False,
     start_time: float = 0.0,
     step_offset: int = 0,
+    pause_callback: Callable[[], None] | None = None,
 ) -> SolverResult:
     """Advance a case from its current time to its end time or iteration limit."""
     if case.mesh is None:
@@ -276,6 +277,8 @@ def solve_case(
     steps = step_offset
     for local_step in range(1, settings.max_iterations + 1):
         step = step_offset + local_step
+        if pause_callback is not None:
+            pause_callback()
         if cancel_callback is not None and cancel_callback():
             break
         try:
@@ -1520,6 +1523,135 @@ def _wall_friction_velocity(
         else:
             upper = friction_velocity
     return 0.5 * (lower + upper)
+
+
+def derive_solution_fields(
+    case: Case, states: tuple[InitialState, ...]
+) -> dict[str, tuple[float, ...]]:
+    """Compute cell-centered thermodynamic and wall-resolution fields."""
+    if case.mesh is None:
+        return {}
+    if len(states) != len(case.mesh.cells):
+        raise SolverError("Solution state count must match the mesh cell count.")
+    settings = case.numerics
+    if settings.gamma <= 1.0 or settings.gas_constant <= 0.0:
+        raise SolverError("Derived fields require gamma > 1 and a positive gas constant.")
+    primitive = np.asarray(
+        [
+            (state.density, state.velocity_x, state.velocity_y, state.pressure)
+            for state in states
+        ],
+        dtype=float,
+    )
+    if not np.isfinite(primitive).all() or np.any(primitive[:, (0, 3)] <= 0.0):
+        raise SolverError(
+            "Derived fields require finite states with positive density and pressure."
+        )
+
+    density, velocity_x, velocity_y, pressure = primitive.T
+    speed_squared = velocity_x**2 + velocity_y**2
+    mach_squared = speed_squared * density / (settings.gamma * pressure)
+    total_factor = 1.0 + 0.5 * (settings.gamma - 1.0) * mach_squared
+    temperature = pressure / (density * settings.gas_constant)
+    total_temperature = temperature * total_factor
+    total_pressure = pressure * total_factor ** (
+        settings.gamma / (settings.gamma - 1.0)
+    )
+    total_density = total_pressure / (settings.gas_constant * total_temperature)
+    y_plus = np.zeros(len(states), dtype=float)
+
+    if settings.viscosity_model != "Inviscid":
+        temperature = np.maximum(temperature, 1e-12)
+        viscosity = _dynamic_viscosity(temperature, settings)
+        if not np.isfinite(viscosity).all() or np.any(viscosity <= 0.0):
+            raise SolverError("y+ requires positive finite molecular viscosity.")
+        cell_centers = []
+        for node_ids in case.mesh.cells:
+            points = [case.mesh.points[node_id] for node_id in node_ids]
+            twice_area = sum(
+                x0 * y1 - x1 * y0
+                for (x0, y0), (x1, y1) in zip(
+                    points, points[1:] + points[:1]
+                )
+            )
+            x_sum = 0.0
+            y_sum = 0.0
+            for (x0, y0), (x1, y1) in zip(
+                points, points[1:] + points[:1]
+            ):
+                cross = x0 * y1 - x1 * y0
+                x_sum += (x0 + x1) * cross
+                y_sum += (y0 + y1) * cross
+            cell_centers.append(
+                (x_sum / (3.0 * twice_area), y_sum / (3.0 * twice_area))
+            )
+        conditions = {
+            boundary.patch_id: boundary for boundary in case.boundary_conditions
+        }
+        closest_wall: dict[int, tuple[float, np.ndarray]] = {}
+        no_slip_faces = [
+            face_id
+            for face_id, neighbour in enumerate(case.mesh.face_neighbours)
+            if neighbour < 0
+            and int(case.mesh.face_patch_ids[face_id]) in conditions
+            and conditions[int(case.mesh.face_patch_ids[face_id])].kind == "Wall"
+            and conditions[
+                int(case.mesh.face_patch_ids[face_id])
+            ].mechanical_condition
+            == "No-slip"
+        ]
+        for face_id in no_slip_faces:
+            owner = case.mesh.face_owners[face_id]
+            node_a, node_b = case.mesh.faces[face_id]
+            point_a = np.asarray(case.mesh.points[node_a], dtype=float)
+            point_b = np.asarray(case.mesh.points[node_b], dtype=float)
+            edge = point_b - point_a
+            edge_length = float(np.linalg.norm(edge))
+            if edge_length <= 1e-14:
+                raise SolverError("Wall face has invalid length.")
+            normal = np.array((edge[1], -edge[0])) / edge_length
+            distance = abs(
+                float(np.dot(0.5 * (point_a + point_b) - cell_centers[owner], normal))
+            )
+            if distance <= 1e-14:
+                raise SolverError("Wall face has invalid cell-center distance.")
+            if owner not in closest_wall or distance < closest_wall[owner][0]:
+                closest_wall[owner] = (distance, normal)
+
+        for owner, (distance, normal) in closest_wall.items():
+            velocity = primitive[owner, 1:3]
+            tangential_velocity = velocity - float(np.dot(velocity, normal)) * normal
+            speed = float(np.linalg.norm(tangential_velocity))
+            if (
+                settings.turbulence_model == "Menter k-omega SST"
+                and settings.turbulence_wall_treatment == "Wall functions"
+            ):
+                friction_velocity = _wall_friction_velocity(
+                    speed,
+                    float(density[owner]),
+                    float(viscosity[owner]),
+                    distance,
+                )
+            else:
+                wall_shear = viscosity[owner] * speed / distance
+                friction_velocity = math.sqrt(wall_shear / density[owner])
+            y_plus[owner] = (
+                friction_velocity * distance * density[owner] / viscosity[owner]
+            )
+
+    fields = {
+        "mach_number": np.sqrt(mach_squared),
+        "total_pressure": total_pressure,
+        "total_temperature": total_temperature,
+        "total_density": total_density,
+        "y_plus": y_plus,
+    }
+    if any(not np.isfinite(values).all() for values in fields.values()):
+        raise SolverError("Derived solution fields contain non-finite values.")
+    return {
+        key: tuple(float(value) for value in values)
+        for key, values in fields.items()
+    }
 
 
 def _sst_wall_values(
