@@ -17,6 +17,7 @@ from PyQt5.QtGui import (
 )
 from PyQt5.QtWidgets import (
     QFrame,
+    QGraphicsEllipseItem,
     QGraphicsLineItem,
     QGraphicsPixmapItem,
     QGraphicsPolygonItem,
@@ -291,6 +292,7 @@ class ColorBarOverlay(QFrame):
         super().__init__(canvas.viewport())
         self.canvas = canvas
         self._drag_offset: QPoint | None = None
+        self._position = QPoint(16, 16)
         self.orientation = "Horizontal"
         self.setObjectName("color_bar_overlay")
         self.setFrameShape(QFrame.StyledPanel)
@@ -313,7 +315,7 @@ class ColorBarOverlay(QFrame):
         layout.addLayout(legend_row)
         self.legend.installEventFilter(self)
         self.legend.setCursor(Qt.SizeAllCursor)
-        self.move(16, 16)
+        self.move_to(self._position)
         self.hide()
 
     def set_values(
@@ -336,12 +338,13 @@ class ColorBarOverlay(QFrame):
             else:
                 self.setMinimumSize(250, 62)
                 self.resize(310, 72)
-            self.move_to(self.pos())
+            self.move_to(self._position)
 
     def move_to(self, position: QPoint) -> None:
         bounds = self.parentWidget().rect()
         x = max(0, min(position.x(), max(0, bounds.width() - self.width())))
         y = max(0, min(position.y(), max(0, bounds.height() - self.height())))
+        self._position = QPoint(x, y)
         self.move(x, y)
 
     def eventFilter(self, watched, event) -> bool:
@@ -378,6 +381,7 @@ class MeshCanvas(QGraphicsView):
         self.scale(1.0, -1.0)
         self.mesh: FiniteVolumeMesh | None = None
         self.selected_patch_id: int | None = None
+        self._solution_cut: tuple[float, float, float] | None = None
         self.solution: tuple[InitialState, ...] | None = None
         self.derived_solution_fields: dict[str, tuple[float, ...]] = {}
         self.show_grid = True
@@ -508,6 +512,7 @@ class MeshCanvas(QGraphicsView):
     def set_mesh(self, mesh: FiniteVolumeMesh | None) -> None:
         self.mesh = mesh
         self.selected_patch_id = None
+        self._solution_cut = None
         self.solution = None
         self._cell_bounds = ()
         self._cell_centers = ()
@@ -572,6 +577,85 @@ class MeshCanvas(QGraphicsView):
     ) -> None:
         self.solution = solution
         self.derived_solution_fields = derived_fields or {}
+
+    def set_solution_cut(
+        self, point_x: float, point_y: float, angle_degrees: float
+    ) -> None:
+        if not all(math.isfinite(value) for value in (point_x, point_y, angle_degrees)):
+            raise ValueError("Cut point and angle must be finite.")
+        self._solution_cut = (point_x, point_y, angle_degrees)
+        self._draw_mesh()
+        self.viewport().update()
+
+    def clear_solution_cut(self) -> None:
+        if self._solution_cut is None:
+            return
+        self._solution_cut = None
+        self._draw_mesh()
+        self.viewport().update()
+
+    def _draw_solution_cut(self) -> None:
+        if self.mesh is None or self._solution_cut is None or not self.mesh.points:
+            return
+        point_x, point_y, angle_degrees = self._solution_cut
+        direction_x = math.cos(math.radians(angle_degrees))
+        direction_y = math.sin(math.radians(angle_degrees))
+        bounds = (
+            min(x for x, _ in self.mesh.points),
+            min(y for _, y in self.mesh.points),
+            max(x for x, _ in self.mesh.points),
+            max(y for _, y in self.mesh.points),
+        )
+        scale = max(bounds[2] - bounds[0], bounds[3] - bounds[1], 1.0)
+        tolerance = scale * 1e-12
+        lower = -math.inf
+        upper = math.inf
+        for coordinate, direction, minimum, maximum in (
+            (point_x, direction_x, bounds[0], bounds[2]),
+            (point_y, direction_y, bounds[1], bounds[3]),
+        ):
+            if abs(direction) <= 1e-15:
+                if coordinate < minimum - tolerance or coordinate > maximum + tolerance:
+                    return
+                continue
+            first = (minimum - coordinate) / direction
+            second = (maximum - coordinate) / direction
+            lower = max(lower, min(first, second))
+            upper = min(upper, max(first, second))
+        if not math.isfinite(lower) or not math.isfinite(upper) or upper - lower <= tolerance:
+            return
+
+        start_x = point_x + lower * direction_x
+        start_y = point_y + lower * direction_y
+        end_x = point_x + upper * direction_x
+        end_y = point_y + upper * direction_y
+        underlay = QGraphicsLineItem(start_x, start_y, end_x, end_y)
+        underlay_pen = QPen(QColor("#FFFFFF"), 5.0)
+        underlay_pen.setCosmetic(True)
+        underlay.setPen(underlay_pen)
+        underlay.setZValue(1000)
+        self.scene().addItem(underlay)
+        line = QGraphicsLineItem(start_x, start_y, end_x, end_y)
+        line_pen = QPen(QColor("#F43F5E"), 2.5)
+        line_pen.setCosmetic(True)
+        line.setPen(line_pen)
+        line.setData(0, "solution_cut")
+        line.setZValue(1001)
+        self.scene().addItem(line)
+
+        if (
+            bounds[0] - tolerance <= point_x <= bounds[2] + tolerance
+            and bounds[1] - tolerance <= point_y <= bounds[3] + tolerance
+        ):
+            radius = scale * 0.006
+            marker = QGraphicsEllipseItem(
+                point_x - radius, point_y - radius, 2.0 * radius, 2.0 * radius
+            )
+            marker.setPen(QPen(QColor("#FFFFFF"), 3.0))
+            marker.setBrush(QColor("#F43F5E"))
+            marker.setData(0, "solution_cut_origin")
+            marker.setZValue(1002)
+            self.scene().addItem(marker)
 
     def set_display_options(
         self,
@@ -665,6 +749,7 @@ class MeshCanvas(QGraphicsView):
                 self.scene().addItem(item)
 
         if not self.show_mesh:
+            self._draw_solution_cut()
             bounds = self.scene().itemsBoundingRect()
             margin = max(1.0, max(bounds.width(), bounds.height()) * 0.04)
             bounds.adjust(-margin, -margin, margin, margin)
@@ -696,6 +781,7 @@ class MeshCanvas(QGraphicsView):
             item.setPen(pen)
             self.scene().addItem(item)
 
+        self._draw_solution_cut()
         bounds = self.scene().itemsBoundingRect()
         if bounds.width() < 1e-9:
             bounds.adjust(-0.5, 0.0, 0.5, 0.0)
@@ -857,7 +943,12 @@ class MeshCanvas(QGraphicsView):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        self.color_bar_overlay.move_to(self.color_bar_overlay.pos())
+        self.color_bar_overlay.move_to(self.color_bar_overlay._position)
+
+    def scrollContentsBy(self, dx: int, dy: int) -> None:
+        super().scrollContentsBy(dx, dy)
+        if hasattr(self, "color_bar_overlay"):
+            self.color_bar_overlay.move_to(self.color_bar_overlay._position)
 
     def reset_zoom(self) -> None:
         if self.mesh is not None:

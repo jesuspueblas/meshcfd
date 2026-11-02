@@ -7,6 +7,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from threading import Event
+from typing import Callable
 
 from PyQt5.QtCore import QRect, QSize, Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QColor, QCursor, QIcon, QKeySequence, QPainter, QPen, QPixmap
@@ -16,14 +17,17 @@ from PyQt5.QtWidgets import (
     QDockWidget,
     QFileDialog,
     QFrame,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
     QScrollArea,
+    QSizePolicy,
     QStyle,
     QToolBar,
     QToolTip,
+    QWidget,
 )
 
 from meshcfd.core.initial_conditions import evaluate_initial_conditions
@@ -38,9 +42,11 @@ from meshcfd.gui.boundary_panel import BoundaryPanel
 from meshcfd.gui.canvas import MeshCanvas
 from meshcfd.gui.initial_conditions_panel import InitialConditionsPanel
 from meshcfd.gui.numerics_panel import NumericsPanel
+from meshcfd.gui.results import ConvergenceHistoryWidget, CutProfileWidget
 from meshcfd.gui.visualization_panel import VisualizationPanel
 from meshcfd.io.mesh_io import MeshImportError, load_mesh
 from meshcfd.io.project_io import load_case, save_case
+from meshcfd.io.vtk_io import VTKSeriesWriter, export_vtu
 
 
 class _SolverWorker(QThread):
@@ -48,20 +54,61 @@ class _SolverWorker(QThread):
     pause_state_changed = pyqtSignal(bool)
 
     def __init__(
-        self, case: Case, initial_states, live_solution_updates: bool
+        self,
+        case: Case,
+        initial_states: tuple[InitialState, ...] | None,
+        live_solution_updates: bool,
+        vtk_series_path: Path | None = None,
+        vtk_interval: int = 100,
     ) -> None:
         super().__init__()
         self.case = case
         self.initial_states = initial_states
         self.live_solution_updates = live_solution_updates
+        self.vtk_series_path = vtk_series_path
+        self.vtk_interval = vtk_interval
         self.result: SolverResult | None = None
         self.error: str | None = None
+        self.output_error: str | None = None
         self._resume_event = Event()
         self._resume_event.set()
         self._stop_requested = Event()
 
     def run(self) -> None:
         try:
+            series_writer: VTKSeriesWriter | None = None
+            solution_callback: Callable[[int, float, tuple[InitialState, ...]], None] | None = None
+            if self.vtk_series_path is not None:
+                try:
+                    series_writer = VTKSeriesWriter(
+                        self.vtk_series_path, append=self.case.solution_steps > 0
+                    )
+                    if self.initial_states is not None:
+                        series_writer.add_snapshot(
+                            self.case,
+                            self.initial_states,
+                            self.case.solution_time,
+                            self.case.solution_steps,
+                        )
+                except (OSError, ValueError) as error:
+                    self.output_error = str(error)
+                    series_writer = None
+
+                if series_writer is not None:
+                    writer = series_writer
+
+                    def write_snapshot(
+                        step: int, time: float, states: tuple[InitialState, ...]
+                    ) -> None:
+                        try:
+                            writer.add_snapshot(self.case, states, time, step)
+                        except (OSError, ValueError) as error:
+                            self.output_error = str(error)
+                            self._stop_requested.set()
+                            self.requestInterruption()
+                            self.resume()
+
+                    solution_callback = write_snapshot
             self.result = solve_case(
                 self.case,
                 self.initial_states,
@@ -71,7 +118,26 @@ class _SolverWorker(QThread):
                 self.case.solution_time,
                 self.case.solution_steps,
                 self._pause_at_checkpoint,
+                **(
+                    {
+                        "solution_callback": solution_callback,
+                        "solution_interval": self.vtk_interval,
+                    }
+                    if solution_callback is not None
+                    else {}
+                ),
             )
+            if series_writer is not None and self.result is not None:
+                if self.output_error is None:
+                    try:
+                        series_writer.add_snapshot(
+                            self.case,
+                            self.result.states,
+                            self.result.time,
+                            self.result.steps,
+                        )
+                    except (OSError, ValueError) as error:
+                        self.output_error = str(error)
         except Exception as error:
             self.error = str(error)
 
@@ -112,9 +178,15 @@ class MainWindow(QMainWindow):
         self._run_revision: int | None = None
         self._run_case_ref: Case | None = None
         self._solver_worker: _SolverWorker | None = None
+        self._latest_solution_progress: SolverProgress | None = None
         self._pause_requested = False
         self._live_solution_updates = False
+        self._vtk_series_path: Path | None = None
+        self._vtk_interval = 100
+        self._convergence_history: list[tuple[int, float, tuple[float, ...]]] = []
+        self._history_revision = self._case_revision
         self._dirty = False
+        self.setMinimumSize(640, 480)
         self.resize(1400, 850)
 
         self.canvas = MeshCanvas(self)
@@ -122,8 +194,9 @@ class MainWindow(QMainWindow):
         self.setDockNestingEnabled(True)
 
         self.boundary_panel = BoundaryPanel(self)
+        self.boundary_scroll = self._create_scroll_area(self.boundary_panel)
         self.boundary_dock = self._add_dock(
-            "Boundary Conditions", Qt.LeftDockWidgetArea, self.boundary_panel
+            "Boundary Conditions", Qt.LeftDockWidgetArea, self.boundary_scroll
         )
         self.initial_conditions_panel = InitialConditionsPanel(self)
         self.initial_conditions_dock = self._add_dock(
@@ -170,6 +243,37 @@ class MainWindow(QMainWindow):
         )
         self.resizeDocks([self.output_dock], [180], Qt.Vertical)
         self.visualization_panel = VisualizationPanel(self)
+        self.convergence_history_widget = ConvergenceHistoryWidget(
+            lambda: tuple(self._convergence_history), self
+        )
+        self.convergence_history_scroll = self._create_scroll_area(
+            self.convergence_history_widget
+        )
+        self.convergence_history_dock = self._add_dock(
+            "Convergence History",
+            Qt.BottomDockWidgetArea,
+            self.convergence_history_scroll,
+            Qt.AllDockWidgetAreas,
+        )
+        self.cut_profile_widget = CutProfileWidget(
+            self.visualization_panel.variable_combo.currentText(), self
+        )
+        self.cut_profile_scroll = self._create_scroll_area(self.cut_profile_widget)
+        self.cut_profile_dock = self._add_dock(
+            "Solution Cut",
+            Qt.RightDockWidgetArea,
+            self.cut_profile_scroll,
+            Qt.AllDockWidgetAreas,
+        )
+        self.convergence_history_dock.hide()
+        self.cut_profile_dock.hide()
+        self._cut_profile_active = False
+        self.cut_profile_widget.cut_line_changed.connect(
+            self._on_cut_profile_line_changed
+        )
+        self.cut_profile_dock.visibilityChanged.connect(
+            self._on_cut_profile_visibility_changed
+        )
         self.boundary_panel.set_case(self.case)
         self.numerics_panel.set_case(self.case)
         self.initial_conditions_panel.set_case(self.case)
@@ -199,6 +303,7 @@ class MainWindow(QMainWindow):
         self._create_toolbar()
         self._create_menus()
         self._update_visualization()
+        self._update_results_actions()
         self._update_title()
         self._log_output("MeshCFD ready.")
 
@@ -208,6 +313,7 @@ class MainWindow(QMainWindow):
         dock = QDockWidget(title, self)
         dock.setObjectName(title.lower().replace(" ", "_"))
         dock.setWidget(widget)
+        dock.setMinimumSize(0, 0)
         dock.setAllowedAreas(
             allowed_areas
             if allowed_areas is not None
@@ -215,6 +321,16 @@ class MainWindow(QMainWindow):
         )
         self.addDockWidget(area, dock)
         return dock
+
+    def _create_scroll_area(self, widget: QWidget) -> QScrollArea:
+        scroll = QScrollArea(self)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidgetResizable(True)
+        scroll.setMinimumSize(0, 0)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setWidget(widget)
+        return scroll
 
     def _log_output(self, message: str, level: str = "INFO") -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -262,6 +378,25 @@ class MainWindow(QMainWindow):
         self.action_grid.setChecked(True)
         self.action_grid.triggered.connect(self._on_toggle_grid)
 
+        self.action_export_vtu = QAction("Export Current Solution to VTU...", self)
+        self.action_export_vtu.triggered.connect(self._on_export_vtu)
+        self.action_configure_vtk_series = QAction(
+            "Configure VTU/PVD Time-Series Export...", self
+        )
+        self.action_configure_vtk_series.triggered.connect(
+            self._on_configure_vtk_series
+        )
+        self.action_disable_vtk_series = QAction(
+            "Disable Time-Series Export", self
+        )
+        self.action_disable_vtk_series.triggered.connect(
+            self._on_disable_vtk_series
+        )
+        self.action_convergence_history = (
+            self.convergence_history_dock.toggleViewAction()
+        )
+        self.action_solution_cut = self.cut_profile_dock.toggleViewAction()
+
     def _create_menus(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
         for action in (self.action_new, self.action_open, self.action_save, self.action_save_as):
@@ -277,6 +412,14 @@ class MainWindow(QMainWindow):
         simulation_menu.addAction(self.action_run)
         simulation_menu.addAction(self.action_stop)
 
+        results_menu = self.menuBar().addMenu("&Results")
+        results_menu.addAction(self.action_export_vtu)
+        results_menu.addAction(self.action_configure_vtk_series)
+        results_menu.addAction(self.action_disable_vtk_series)
+        results_menu.addSeparator()
+        results_menu.addAction(self.action_convergence_history)
+        results_menu.addAction(self.action_solution_cut)
+
         view_menu = self.menuBar().addMenu("&View")
         view_menu.addAction(self.action_grid)
         view_menu.addSeparator()
@@ -286,6 +429,8 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.initial_conditions_dock.toggleViewAction())
         view_menu.addAction(self.visualization_toolbar.toggleViewAction())
         view_menu.addAction(self.output_dock.toggleViewAction())
+        view_menu.addAction(self.action_convergence_history)
+        view_menu.addAction(self.action_solution_cut)
         self.action_clear_output = QAction("Clear Output", self)
         self.action_clear_output.triggered.connect(self.output_terminal.clear)
         view_menu.addAction(self.action_clear_output)
@@ -341,7 +486,18 @@ class MainWindow(QMainWindow):
         )
         self.addToolBarBreak(Qt.TopToolBarArea)
         self.addToolBar(Qt.TopToolBarArea, self.visualization_toolbar)
-        self.visualization_toolbar.addWidget(self.visualization_panel)
+        self.visualization_scroll = QScrollArea(self)
+        self.visualization_scroll.setFrameShape(QFrame.NoFrame)
+        self.visualization_scroll.setWidgetResizable(False)
+        self.visualization_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.visualization_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.visualization_scroll.setMinimumSize(0, 0)
+        self.visualization_scroll.setMaximumHeight(60)
+        self.visualization_scroll.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Fixed
+        )
+        self.visualization_scroll.setWidget(self.visualization_panel)
+        self.visualization_toolbar.addWidget(self.visualization_scroll)
 
     @staticmethod
     def _create_grid_icon(size: int) -> QIcon:
@@ -374,9 +530,12 @@ class MainWindow(QMainWindow):
 
     def _set_case(self, case: Case, path: Path | None) -> None:
         self._case_revision += 1
+        self._convergence_history.clear()
+        self._history_revision = self._case_revision
         self.case = case
         self.current_path = path
         self._simulation_solution = None
+        self._latest_solution_progress = None
         self._dirty = False
         self.canvas.set_mesh(case.mesh)
         self.boundary_panel.set_case(case)
@@ -384,6 +543,7 @@ class MainWindow(QMainWindow):
         self.initial_conditions_panel.set_case(case)
         self._update_mesh_info()
         self._refresh_solution(preserve_saved_solution=True)
+        self._update_results_actions()
         self._update_title()
         self._log_output(f"Loaded case settings: {case.name}.")
 
@@ -432,11 +592,15 @@ class MainWindow(QMainWindow):
         self.case.solution_time = 0.0
         self.case.solution_steps = 0
         self._update_visualization()
+        self._update_results_actions()
 
     def _update_visualization(self, *_) -> None:
         variable = self.visualization_panel.variable_combo.currentText()
         palette = self.visualization_panel.palette_combo.currentText()
         solution = self._simulation_solution or self._initial_solution
+        self.convergence_history_widget.set_turbulence_enabled(
+            self.case.numerics.turbulence_model == "Menter k-omega SST"
+        )
         self.canvas.set_interaction_mode(
             self.visualization_panel.interaction_mode
         )
@@ -447,6 +611,10 @@ class MainWindow(QMainWindow):
                 else {}
             )
             self.canvas.set_solution(solution, derived_fields)
+            if self.cut_profile_dock.isVisible():
+                self.cut_profile_widget.set_solution(
+                    self.case, solution, variable
+                )
             values = self.canvas.set_display_options(
                 show_grid=self.action_grid.isChecked(),
                 show_mesh=self.visualization_panel.show_mesh_checkbox.isChecked(),
@@ -485,6 +653,7 @@ class MainWindow(QMainWindow):
             palette,
             scale=self.visualization_panel.scale_combo.currentText(),
         )
+        self._update_results_actions()
 
     def _show_cell_info(
         self,
@@ -627,6 +796,110 @@ class MainWindow(QMainWindow):
             f"{len(mesh.faces)} faces, {len(mesh.patches)} patches."
         )
 
+    def _update_results_actions(self) -> None:
+        has_solution = (
+            self._simulation_solution is not None
+            or self.case.final_solution is not None
+        )
+        self.action_export_vtu.setEnabled(has_solution)
+        self.action_solution_cut.setEnabled(self.case.mesh is not None)
+        self.action_convergence_history.setEnabled(True)
+        self.action_disable_vtk_series.setEnabled(self._vtk_series_path is not None)
+
+    def _on_export_vtu(self) -> None:
+        states = self._simulation_solution or self.case.final_solution
+        if states is None:
+            QMessageBox.information(
+                self, "No Solution", "Run the solver before exporting a solution."
+            )
+            return
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Export Current Solution", "", "VTU files (*.vtu)"
+        )
+        if not filename:
+            return
+        path = Path(filename)
+        if path.suffix.lower() != ".vtu":
+            path = path.with_suffix(".vtu")
+        try:
+            solution_time = self.case.solution_time
+            solution_step = self.case.solution_steps
+            if (
+                self._solver_worker is not None
+                and self._latest_solution_progress is not None
+            ):
+                solution_time = self._latest_solution_progress.time
+                solution_step = self._latest_solution_progress.step
+            export_vtu(
+                path, self.case, states, solution_time, solution_step
+            )
+        except (OSError, ValueError) as error:
+            self._log_output(f"Could not export VTU solution: {error}", "ERROR")
+            QMessageBox.critical(self, "VTU Export Error", str(error))
+            return
+        self._log_output(f"Exported solution to {path}.")
+        self.status_label.setText(f"Exported solution: {path.name}")
+
+    def _on_configure_vtk_series(self) -> None:
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Configure VTU/PVD Time-Series Export", "", "PVD files (*.pvd)"
+        )
+        if not filename:
+            return
+        interval, accepted = QInputDialog.getInt(
+            self,
+            "VTK Output Interval",
+            "Write a snapshot every N solver iterations:",
+            self._vtk_interval,
+            1,
+            10_000_000,
+        )
+        if not accepted:
+            return
+        path = Path(filename)
+        if path.suffix.lower() != ".pvd":
+            path = path.with_suffix(".pvd")
+        self._vtk_series_path = path
+        self._vtk_interval = interval
+        self._update_results_actions()
+        self._log_output(
+            f"VTK time-series export configured: {path}, every {interval} steps. "
+            "It will be used by the next solver run."
+        )
+        self.status_label.setText(f"VTK series configured: {path.name}")
+
+    def _on_disable_vtk_series(self) -> None:
+        if self._vtk_series_path is None:
+            return
+        self._log_output(f"Disabled VTK time-series export to {self._vtk_series_path}.")
+        self._vtk_series_path = None
+        self._update_results_actions()
+
+    def _on_cut_profile_line_changed(
+        self, point_x: float, point_y: float, angle_degrees: float
+    ) -> None:
+        if self._cut_profile_active:
+            self.canvas.set_solution_cut(point_x, point_y, angle_degrees)
+
+    def _on_cut_profile_visibility_changed(self, visible: bool) -> None:
+        self._cut_profile_active = visible
+        if not visible:
+            self.canvas.clear_solution_cut()
+            return
+        states = self._simulation_solution or self.case.final_solution
+        if states is None:
+            states = self._initial_solution
+        self.cut_profile_widget.set_solution(
+            self.case,
+            states,
+            self.visualization_panel.variable_combo.currentText(),
+        )
+        self.canvas.set_solution_cut(
+            self.cut_profile_widget.x_spin.value(),
+            self.cut_profile_widget.y_spin.value(),
+            self.cut_profile_widget.angle_spin.value(),
+        )
+
     def _on_run(self) -> None:
         if self._solver_worker is not None:
             if self._pause_requested:
@@ -650,14 +923,23 @@ class MainWindow(QMainWindow):
                 self, "No Mesh", "Import a finite-volume mesh before setting up a run."
             )
             return
+        if self._history_revision != self._case_revision:
+            self._convergence_history.clear()
+            self._history_revision = self._case_revision
+            self._update_results_actions()
         snapshot = copy.deepcopy(self.case)
         initial_states = copy.deepcopy(
             self._simulation_solution or self._initial_solution
         )
         self._run_revision = self._case_revision
         self._run_case_ref = self.case
+        self._latest_solution_progress = None
         worker = _SolverWorker(
-            snapshot, initial_states, self._live_solution_updates
+            snapshot,
+            initial_states,
+            self._live_solution_updates,
+            self._vtk_series_path,
+            self._vtk_interval,
         )
         self._solver_worker = worker
         worker.progress.connect(self._on_solver_progress)
@@ -712,14 +994,23 @@ class MainWindow(QMainWindow):
             self._log_output("Solver resumed.")
 
     def _on_solver_progress(self, progress: SolverProgress) -> None:
-        density, momentum_x, momentum_y, energy = progress.residuals
+        density, momentum_x, momentum_y, energy = progress.residuals[:4]
+        self._convergence_history.append(
+            (progress.step, progress.time, progress.residuals)
+        )
+        if len(self._convergence_history) > 5000:
+            self._convergence_history = self._convergence_history[::2]
         worker = self._solver_worker
-        self._log_output(
+        residual_message = (
             f"{progress.step:10d} {progress.time:12.5e} {progress.time_step:12.5e}"
             f" {density:12.5e} {momentum_x:12.5e} {momentum_y:12.5e}"
-            f" {energy:12.5e}",
-            "ITER",
+            f" {energy:12.5e}"
         )
+        if len(progress.residuals) >= 6:
+            residual_message += (
+                f" {progress.residuals[4]:12.5e} {progress.residuals[5]:12.5e}"
+            )
+        self._log_output(residual_message, "ITER")
         if worker is not None and not worker.stop_requested:
             self.status_label.setText(
                 f"Solver running: step {progress.step}, t = {progress.time:.6g}"
@@ -729,7 +1020,10 @@ class MainWindow(QMainWindow):
             and self._run_revision == self._case_revision
         ):
             self._simulation_solution = progress.states
+            self._latest_solution_progress = progress
             self._update_visualization()
+        else:
+            self._update_results_actions()
 
     def _on_solver_finished(self) -> None:
         worker = self._solver_worker
@@ -772,12 +1066,17 @@ class MainWindow(QMainWindow):
                 self, "Solver Error", "The solver finished without producing a result."
             )
             return
+        settings_unchanged = self._run_revision == self._case_revision
         self._simulation_solution = result.states
+        self._latest_solution_progress = None
         self.case.final_solution = result.states
         self.case.solution_time = result.time
         self.case.solution_steps = result.steps
         self._update_visualization()
+        self._update_results_actions()
         self._mark_dirty()
+        if settings_unchanged:
+            self._history_revision = self._case_revision
         if result.completed:
             message = (
                 f"Completed at t = {result.time:.6g} in {result.steps} steps "
@@ -792,6 +1091,13 @@ class MainWindow(QMainWindow):
             )
             self.status_label.setText(message)
             self._log_output(message, "WARNING")
+        if worker.output_error is not None:
+            warning = (
+                "VTK time-series export failed; the available solver result was "
+                f"retained. {worker.output_error}"
+            )
+            self._log_output(warning, "WARNING")
+            QMessageBox.warning(self, "VTK Export Warning", warning)
 
     def closeEvent(self, event) -> None:
         if self._confirm_discard_changes():

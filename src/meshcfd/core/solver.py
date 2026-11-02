@@ -33,7 +33,7 @@ class SolverProgress:
     step: int
     time: float
     time_step: float
-    residuals: tuple[float, float, float, float]
+    residuals: tuple[float, ...]
     states: tuple[InitialState, ...] | None = None
 
 
@@ -141,6 +141,8 @@ def solve_case(
     start_time: float = 0.0,
     step_offset: int = 0,
     pause_callback: Callable[[], None] | None = None,
+    solution_callback: Callable[[int, float, tuple[InitialState, ...]], None] | None = None,
+    solution_interval: int = 1,
 ) -> SolverResult:
     """Advance a case from its current time to its end time or iteration limit."""
     if case.mesh is None:
@@ -191,6 +193,12 @@ def solve_case(
         or step_offset < 0
     ):
         raise SolverError("Current solution step must be a non-negative integer.")
+    if (
+        isinstance(solution_interval, bool)
+        or not isinstance(solution_interval, int)
+        or solution_interval <= 0
+    ):
+        raise SolverError("Solution output interval must be a positive integer.")
     if not math.isfinite(settings.gamma) or settings.gamma <= 1.0:
         raise SolverError("Specific heat ratio must be finite and greater than 1.")
     if not math.isfinite(settings.gas_constant) or settings.gas_constant <= 0.0:
@@ -298,12 +306,19 @@ def solve_case(
             derivative = _residual(
                 start, geometry, settings, start_turbulence
             )
+            turbulence_component_residuals: tuple[float, ...] = ()
             if start_turbulence is not None:
                 turbulence_derivative = _sst_residual(
                     primitive,
                     start_turbulence / primitive[:, :1],
                     geometry,
                     settings,
+                )
+                turbulence_component_residuals = tuple(
+                    float(value)
+                    for value in np.sqrt(
+                        np.mean(turbulence_derivative**2, axis=0)
+                    )
                 )
             if settings.time_integration == "Explicit Euler":
                 conservative = start + time_step * derivative
@@ -408,7 +423,7 @@ def solve_case(
             component_residuals = tuple(
                 float(value)
                 for value in np.sqrt(np.mean(derivative**2, axis=0))
-            )
+            ) + turbulence_component_residuals
             progress_callback(
                 SolverProgress(
                     step,
@@ -418,6 +433,16 @@ def solve_case(
                     progress_states,
                 )
             )
+        if solution_callback is not None and step % solution_interval == 0:
+            snapshot_states = progress_states if progress_callback is not None else None
+            if snapshot_states is None:
+                snapshot_primitive = _primitive_from_conservative(
+                    conservative, turbulence_conservative, settings.gamma
+                )
+                snapshot_states = _states_from_solution(
+                    snapshot_primitive, turbulence_conservative
+                )
+            solution_callback(step, time, snapshot_states)
         if time >= settings.end_time * (1.0 - 1e-13):
             time = settings.end_time
             completed = True

@@ -1,12 +1,16 @@
 import json
+import xml.etree.ElementTree as ET
 from threading import Event
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QMessageBox
+import pytest
+from PyQt5.QtCore import QEvent, QPointF, Qt
+from PyQt5.QtGui import QMouseEvent
+from PyQt5.QtWidgets import QApplication, QMessageBox
 
 from meshcfd.core.model import Case, InitialState
 from meshcfd.core.solver import SolverResult
-from meshcfd.gui.main_window import MainWindow
+from meshcfd.gui.main_window import MainWindow, _SolverWorker
+from meshcfd.gui.results import ConvergenceHistoryWidget, CutProfileWidget, LinePlotWidget
 from meshcfd.io.mesh_io import mesh_from_dict, mesh_to_dict
 from meshcfd.io.project_io import load_case, save_case
 
@@ -66,6 +70,250 @@ def test_main_window_initial_state(qtbot):
     assert window.canvas.color_scale == "Linear"
     assert window.canvas.show_colorbar
     assert window.canvas.color_bar_overlay.orientation == "Vertical"
+    assert not window.action_export_vtu.isEnabled()
+    assert not window.action_solution_cut.isEnabled()
+    assert window.minimumHeight() == 480
+    assert window.boundary_dock.widget() is window.boundary_scroll
+    assert window.boundary_scroll.widget() is window.boundary_panel
+    assert window.convergence_history_dock.widget() is window.convergence_history_scroll
+    assert window.convergence_history_scroll.widget() is window.convergence_history_widget
+    assert window.cut_profile_dock.widget() is window.cut_profile_scroll
+    assert window.cut_profile_scroll.widget() is window.cut_profile_widget
+    for dock in (window.convergence_history_dock, window.cut_profile_dock):
+        assert dock.features() & dock.DockWidgetMovable
+        assert dock.features() & dock.DockWidgetFloatable
+        assert dock.allowedAreas() == Qt.AllDockWidgetAreas
+
+
+def test_result_actions_export_vtu_and_configure_series(qtbot, monkeypatch, tmp_path):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    case = Case()
+    case.set_mesh(make_mesh())
+    window._set_case(case, None)
+    window._simulation_solution = (InitialState(),)
+    window.case.solution_time = 0.25
+    window.case.solution_steps = 5
+    window._update_results_actions()
+    assert window.action_export_vtu.isEnabled()
+    assert window.action_solution_cut.isEnabled()
+
+    export_path = tmp_path / "final.vtu"
+    monkeypatch.setattr(
+        "meshcfd.gui.main_window.QFileDialog.getSaveFileName",
+        lambda *_args: (str(export_path), "VTU files (*.vtu)"),
+    )
+    window._on_export_vtu()
+    assert export_path.exists()
+
+    series_path = tmp_path / "history.pvd"
+    monkeypatch.setattr(
+        "meshcfd.gui.main_window.QFileDialog.getSaveFileName",
+        lambda *_args: (str(series_path), "PVD files (*.pvd)"),
+    )
+    monkeypatch.setattr(
+        "meshcfd.gui.main_window.QInputDialog.getInt",
+        lambda *_args: (25, True),
+    )
+    window._on_configure_vtk_series()
+    assert window._vtk_series_path == series_path
+    assert window._vtk_interval == 25
+    assert window.action_disable_vtk_series.isEnabled()
+    window._on_disable_vtk_series()
+    assert window._vtk_series_path is None
+    assert not window.action_disable_vtk_series.isEnabled()
+
+
+def test_result_widgets_prepare_convergence_and_cut_plot_data(qtbot):
+    history = [(1, 0.1, (0.4, 0.3, 0.2, 0.1, 0.05, 0.01))]
+    convergence = ConvergenceHistoryWidget(lambda: history)
+    qtbot.addWidget(convergence)
+    assert convergence.plot.logarithmic_y
+    assert convergence.plot.x_values == (1.0,)
+    assert convergence.plot.series["Energy"] == (0.1,)
+    assert convergence._turbulence_group.isHidden()
+    assert "Turbulent k" not in convergence.plot.series
+    convergence.set_turbulence_enabled(True)
+    assert not convergence._turbulence_group.isHidden()
+    assert convergence.plot.series["Turbulent k"] == (0.05,)
+    convergence.variable_items["Mass"].setCheckState(0, Qt.Unchecked)
+    assert "Mass" not in convergence.plot.series
+    assert "Energy" in convergence.plot.series
+    convergence.variable_items["Mass"].setCheckState(0, Qt.Checked)
+    assert "Mass" in convergence.plot.series
+    convergence.scale_combo.setCurrentText("Linear")
+    assert not convergence.plot.logarithmic_y
+    convergence.scale_combo.setCurrentText("Logarithmic")
+    assert convergence.plot.logarithmic_y
+
+    history[:] = [(2, 0.2, (0.4, 0.3, 0.2, 0.1))]
+    convergence.refresh_plot()
+    assert "Turbulent k" not in convergence.plot.series
+
+    case = Case()
+    case.set_mesh(make_mesh())
+    cut = CutProfileWidget("Density")
+    qtbot.addWidget(cut)
+    cut.set_solution(case, (InitialState(density=1.5),), "Density")
+    assert cut.plot.x_values == (0.0,)
+    assert cut.plot.series["Density"] == (1.5,)
+
+
+def test_plot_zoom_pan_and_reset_controls(qtbot):
+    plot = LinePlotWidget()
+    qtbot.addWidget(plot)
+    plot.resize(640, 420)
+    plot.set_data((0.0, 1.0, 2.0), {"Mass": (1.0, 2.0, 3.0)}, "Iteration", "Residual")
+    plot.show()
+    qtbot.waitExposed(plot)
+    canvas = plot.canvas
+    initial_bounds = canvas._view_bounds
+
+    plot.zoom_button.click()
+    start = QPointF(110.0, 60.0)
+    end = QPointF(300.0, 220.0)
+    QApplication.sendEvent(
+        canvas,
+        QMouseEvent(
+            QEvent.MouseButtonPress,
+            start,
+            Qt.LeftButton,
+            Qt.LeftButton,
+            Qt.NoModifier,
+        ),
+    )
+    QApplication.sendEvent(
+        canvas,
+        QMouseEvent(
+            QEvent.MouseButtonRelease,
+            end,
+            Qt.LeftButton,
+            Qt.NoButton,
+            Qt.NoModifier,
+        ),
+    )
+    zoomed_bounds = canvas._view_bounds
+    assert zoomed_bounds != initial_bounds
+
+    plot.pan_button.click()
+    QApplication.sendEvent(
+        canvas,
+        QMouseEvent(
+            QEvent.MouseButtonPress,
+            QPointF(200.0, 140.0),
+            Qt.LeftButton,
+            Qt.LeftButton,
+            Qt.NoModifier,
+        ),
+    )
+    QApplication.sendEvent(
+        canvas,
+        QMouseEvent(
+            QEvent.MouseMove,
+            QPointF(240.0, 160.0),
+            Qt.NoButton,
+            Qt.LeftButton,
+            Qt.NoModifier,
+        ),
+    )
+    QApplication.sendEvent(
+        canvas,
+        QMouseEvent(
+            QEvent.MouseButtonRelease,
+            QPointF(240.0, 160.0),
+            Qt.LeftButton,
+            Qt.NoButton,
+            Qt.NoModifier,
+        ),
+    )
+    assert canvas._view_bounds != zoomed_bounds
+    plot.reset_zoom_button.click()
+    assert canvas._view_bounds == initial_bounds
+
+
+def test_plot_series_are_clipped_to_axes(qtbot):
+    plot = LinePlotWidget()
+    qtbot.addWidget(plot)
+    plot.resize(480, 320)
+    plot.set_data(
+        (0.0, 1.0, 2.0, 3.0),
+        {"Mass": (0.5, 10.0, -10.0, 0.5)},
+        "Iteration",
+        "Residual",
+    )
+    plot.show()
+    qtbot.waitExposed(plot)
+    canvas = plot.canvas
+    canvas._view_bounds = (0.0, 3.0, 0.0, 1.0)
+    canvas.update()
+    qtbot.wait(20)
+
+    image = canvas.grab().toImage()
+    axes = canvas._plot_rect()
+    for y in (*range(0, int(axes.top())), *range(int(axes.bottom()) + 2, image.height())):
+        assert not any(
+            (color := image.pixelColor(x, y)).red() < 100
+            and color.green() < 150
+            and color.blue() > 170
+            for x in range(int(axes.left()) + 1, int(axes.right()))
+        )
+
+
+def test_cut_dock_draws_and_updates_reference_line(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitExposed(window)
+    case = Case()
+    case.set_mesh(make_mesh())
+    window._set_case(case, None)
+    window._simulation_solution = (InitialState(density=1.5),)
+    window.cut_profile_dock.show()
+
+    line = next(item for item in window.canvas.scene().items() if item.data(0) == "solution_cut")
+    assert line.line().x1() == pytest.approx(0.0)
+    assert line.line().x2() == pytest.approx(1.0)
+    assert line.line().y1() == pytest.approx(0.5)
+    assert line.line().y2() == pytest.approx(0.5)
+
+    window.cut_profile_widget.angle_spin.setValue(90.0)
+    line = next(item for item in window.canvas.scene().items() if item.data(0) == "solution_cut")
+    assert line.line().x1() == pytest.approx(0.5)
+    assert line.line().x2() == pytest.approx(0.5)
+
+    window.cut_profile_dock.hide()
+    assert not any(
+        item.data(0) == "solution_cut" for item in window.canvas.scene().items()
+    )
+
+
+def test_solver_worker_writes_interval_and_final_vtk_snapshots(tmp_path):
+    case = Case()
+    case.set_mesh(make_mesh())
+    case.numerics.end_time = 100.0
+    case.numerics.max_iterations = 3
+    worker = _SolverWorker(
+        case,
+        (InitialState(),),
+        False,
+        tmp_path / "run.pvd",
+        2,
+    )
+
+    worker.run()
+
+    assert worker.error is None
+    assert worker.output_error is None
+    assert worker.result is not None
+    assert not worker.result.completed
+    entries = [
+        entry.attrib for entry in ET.parse(tmp_path / "run.pvd").findall("./Collection/DataSet")
+    ]
+    assert [entry["file"] for entry in entries] == [
+        "run_00000000.vtu",
+        "run_00000002.vtu",
+        "run_00000003.vtu",
+    ]
 
 
 def test_run_pauses_and_stop_preserves_state_for_updated_settings(qtbot, monkeypatch):
@@ -145,6 +393,11 @@ def test_output_dock_layout_preserves_canvas_width(qtbot):
 
     assert window.initial_conditions_scroll.horizontalScrollBar().maximum() == 0
     assert window.numerics_scroll.horizontalScrollBar().maximum() == 0
+    assert (
+        window.visualization_scroll.horizontalScrollBarPolicy()
+        == Qt.ScrollBarAsNeeded
+    )
+    assert window.minimumSizeHint().height() < 600
 
 
 def test_boundary_and_numerical_controls_update_case(qtbot, monkeypatch):
@@ -212,6 +465,7 @@ def test_sst_controls_update_model_and_boundary_inputs(qtbot, monkeypatch):
 
     panel = window.numerics_panel
     panel.turbulence_model_combo.setCurrentText("Menter k-omega SST")
+    assert not window.convergence_history_widget._turbulence_group.isHidden()
     panel.turbulence_wall_treatment_combo.setCurrentText("Wall functions")
     assert window.case.numerics.turbulence_model == "Menter k-omega SST"
     assert window.case.numerics.turbulence_wall_treatment == "Wall functions"
@@ -234,6 +488,7 @@ def test_sst_controls_update_model_and_boundary_inputs(qtbot, monkeypatch):
     assert window.case.boundary_conditions[1].values["turbulence_intensity"] == 3.0
 
     panel.turbulence_model_combo.setCurrentText("None")
+    assert window.convergence_history_widget._turbulence_group.isHidden()
     assert "turbulence_intensity" not in boundary_panel.value_controls
     window._dirty = False
 

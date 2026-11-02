@@ -491,6 +491,7 @@ def test_solution_toolbar_layout_and_interactive_color_bar(qtbot):
     overlay.move_to(QPoint(80, 60))
     assert overlay.pos() == QPoint(80, 60)
 
+
     def send_mouse_event(widget, event_type, local, global_position, button, buttons):
         QApplication.sendEvent(
             widget,
@@ -568,3 +569,26 @@ def test_solution_toolbar_layout_and_interactive_color_bar(qtbot):
 
     panel.smooth_colors_checkbox.setChecked(True)
     assert window.canvas.smooth_colors
+
+
+def test_color_bar_stays_fixed_in_viewport_while_scrolling(qtbot):
+    canvas = MeshCanvas()
+    qtbot.addWidget(canvas)
+    canvas.resize(360, 240)
+    canvas.scene().setSceneRect(-2000, -2000, 4000, 4000)
+    canvas.show()
+    qtbot.waitExposed(canvas)
+
+    overlay = canvas.color_bar_overlay
+    overlay.show()
+    overlay.move_to(QPoint(80, 60))
+    position = QPoint(overlay.pos())
+    horizontal_scrollbar = canvas.horizontalScrollBar()
+    vertical_scrollbar = canvas.verticalScrollBar()
+    assert horizontal_scrollbar.maximum() > 0
+    assert vertical_scrollbar.maximum() > 0
+
+    horizontal_scrollbar.setValue(horizontal_scrollbar.maximum())
+    vertical_scrollbar.setValue(vertical_scrollbar.maximum())
+
+    assert overlay.pos() == position

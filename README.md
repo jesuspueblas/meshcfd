@@ -127,6 +127,29 @@ For SST with wall functions, the friction velocity uses the solver's
 equilibrium log-law estimate; otherwise it uses the local linear wall shear
 estimate. y+ is not meaningful for inviscid or slip-wall cases.
 
+The Results menu exports the latest completed or partial solution as an ASCII
+VTU file, configures incremental VTU snapshots collected in a PVD time series,
+plots the conservative residual histories (plus k and omega for SST), and
+plots a cell-centered solution cut. Configure the PVD filename and iteration
+interval before a run; the series records the starting state, each interval,
+and the final state.
+Only one snapshot is held at a time by the exporter. A cut is an infinite line
+defined by an angle in degrees and a point `(x, y)`; the selected solution
+field is sampled at cell centers along the intersected mesh cells. The
+convergence graph uses a logarithmic residual axis and retains a bounded,
+decimated history for long runs. Convergence History offers linear and
+logarithmic residual scales and lets you select which residuals to monitor.
+Residuals are organized in a tree, with the turbulence group available only
+when the SST model is selected. Curves are clipped to the plot axes, and the
+color-bar overlay stays fixed in its chosen viewport position while panning.
+Both graph panels provide rectangular zoom, drag-to-pan, mouse-wheel zoom, and
+Reset zoom controls. Convergence History and Solution Cut are movable,
+floatable dock panels whose positions can be arranged alongside the other
+application panels. While the Solution Cut panel is visible, its reference
+point and angle are shown as a highlighted line over the mesh and update as
+the cut parameters change. Panels with potentially constrained content provide
+scroll bars as needed.
+
 ### Isentropic Euler vortex test
 
 For a nondimensional vortex on a `[0, 10] x [0, 10]` domain, pair the opposing

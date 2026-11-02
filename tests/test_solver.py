@@ -16,6 +16,7 @@ from meshcfd.core.model import (
     MeshPatch,
     PeriodicBoundaryPair,
 )
+from meshcfd.core.post import sample_solution_cut
 from meshcfd.core.solver import (
     SolverError,
     SolverProgress,
@@ -836,6 +837,35 @@ def test_solver_continues_from_previous_time_and_step_count():
     assert progress[0].time > first.time
 
 
+def test_solver_emits_solution_snapshots_at_configured_global_steps():
+    case = make_periodic_case()
+    case.numerics.end_time = 10.0
+    case.numerics.max_iterations = 5
+    snapshots = []
+
+    solve_case(
+        case,
+        (InitialState(1.0, 0.1, 0.0, 1.0),),
+        solution_callback=lambda step, time, states: snapshots.append((step, time, states)),
+        solution_interval=2,
+    )
+
+    assert [snapshot[0] for snapshot in snapshots] == [2, 4]
+    assert all(len(snapshot[2]) == len(case.mesh.cells) for snapshot in snapshots)
+
+
+def test_solution_cut_samples_cell_values_in_line_order():
+    case = make_periodic_case(nx=2, length_x=2.0)
+    states = (
+        InitialState(density=1.0),
+        InitialState(density=2.0),
+    )
+
+    samples = sample_solution_cut(case, states, "density", 0.0, 0.0, 0.5)
+
+    assert samples == ((0.5, 1.0), (1.5, 2.0))
+
+
 def test_solver_pause_callback_waits_at_step_boundary_and_resumes():
     case = make_periodic_case()
     case.numerics.end_time = 10.0
@@ -1004,6 +1034,7 @@ def test_sst_solver_advances_with_both_wall_treatments(wall_treatment):
     case.numerics.end_time = 1e-5
     case.numerics.max_iterations = 2
 
+    progress = []
     result = solve_case(
         case,
         tuple(
@@ -1017,10 +1048,18 @@ def test_sst_solver_advances_with_both_wall_treatments(wall_treatment):
             )
             for _cell in case.mesh.cells
         ),
+        progress_callback=progress.append,
     )
 
     assert result.completed
     assert result.steps == 1
+    assert progress
+    assert all(len(item.residuals) == 6 for item in progress)
+    assert all(
+        math.isfinite(value) and value >= 0.0
+        for item in progress
+        for value in item.residuals[4:]
+    )
     assert all(
         state.turbulence_k >= 0.0
         and state.turbulence_omega > 0.0
