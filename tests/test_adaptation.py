@@ -1,6 +1,6 @@
 import pytest
 
-from meshcfd.core.adaptation import adapt_mesh, cell_areas
+from meshcfd.core.adaptation import _split_polygon, adapt_mesh, cell_areas
 from meshcfd.io.mesh_io import mesh_from_dict, mesh_to_dict
 
 
@@ -90,6 +90,21 @@ def test_directional_refinement_splits_along_marked_axis(axis, varying_coordinat
     assert centers[0][other_coordinate] == pytest.approx(
         centers[1][other_coordinate]
     )
+
+
+def test_four_way_refinement_uses_bilinear_center_for_skewed_quad():
+    polygon = ((0.0, 0.0), (2.0, 0.0), (1.6, 1.0), (0.2, 1.4))
+
+    children = _split_polygon(polygon, "xy")
+
+    shared_vertices = set(children[0])
+    for child in children[1:]:
+        shared_vertices.intersection_update(child)
+    expected_center = (
+        sum(point[0] for point in polygon) / 4.0,
+        sum(point[1] for point in polygon) / 4.0,
+    )
+    assert shared_vertices == {expected_center}
 
 
 def test_refined_siblings_can_be_coarsened_back_to_parent():

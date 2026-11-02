@@ -316,7 +316,10 @@ def _split_polygon(
             pieces = (tuple(first_half), tuple(second_half))
             return _validate_split_area(corners, pieces)
         if axis == "xy":
-            center = _diagonal_intersection(corners)
+            center = (
+                sum(point[0] for point in corners) / 4.0,
+                sum(point[1] for point in corners) / 4.0,
+            )
             pieces = tuple(
                 (
                     corners[index],
@@ -402,29 +405,6 @@ def _remove_collinear_vertices(
                 changed = True
                 break
     return tuple(vertices)
-
-
-def _diagonal_intersection(
-    polygon: tuple[tuple[float, float], ...]
-) -> tuple[float, float]:
-    first, opposite = polygon[0], polygon[2]
-    second, other = polygon[1], polygon[3]
-    first_direction = (opposite[0] - first[0], opposite[1] - first[1])
-    second_direction = (other[0] - second[0], other[1] - second[1])
-    denominator = (
-        first_direction[0] * second_direction[1]
-        - first_direction[1] * second_direction[0]
-    )
-    if abs(denominator) <= 1e-14:
-        raise ValueError("Cannot four-way split a degenerate quadrilateral.")
-    offset = (second[0] - first[0], second[1] - first[1])
-    parameter = (
-        offset[0] * second_direction[1] - offset[1] * second_direction[0]
-    ) / denominator
-    return (
-        first[0] + parameter * first_direction[0],
-        first[1] + parameter * first_direction[1],
-    )
 
 
 def _clip_polygon(
