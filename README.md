@@ -11,8 +11,8 @@ The current version provides:
 - Per-patch boundary-condition setup.
 - Translational periodic boundaries, with automatic patch compatibility checks
   and pitch detection along the x or y axis.
-- Transient finite-volume integration of the 2D compressible ideal-gas
-  equations,
+- Transient finite-volume integration and steady-state pseudo-time iteration
+  for the 2D compressible ideal-gas equations,
   with Rusanov, HLLC, and Roe fluxes; explicit Euler, RK2, and RK3; and
   first-order, limited MUSCL-linear, and limited quadratic MUSCL-parabolic
   reconstruction.
@@ -32,15 +32,17 @@ The current version provides:
   formulation additionally exposes log(omega/omega_wall).
 - Default solution-view setup: Density, Rainbow palette, linear scale,
   automatic range, and a visible vertical color legend.
-- Initial numerical controls for MUSCL reconstruction, limiters, fluxes, and
-  time integration. Explicit Euler, RK2, RK3, and RK4 are available, together
+- Initial numerical controls for MUSCL reconstruction, limiters, fluxes,
+  global adaptive or fixed time steps, and local CFL pseudo-time stepping for
+  steady-state convergence. Explicit Euler, RK2, RK3, and RK4 are available, together
   with an implicit Euler method that retains the selected spatial
   reconstruction, using matrix-free GMRES and a first-order Jacobian
   approximation.
   GMRES relative tolerance, iteration limit, Krylov dimension, and ILU or
   LU-SGS preconditioning are configurable (LU-SGS is the default). Implicit
   Euler accepts CFL values up to 1000 and halves the time step automatically
-  when the nonlinear solve cannot converge.
+  in adaptive modes when the nonlinear solve cannot converge; fixed mode instead
+  reports a failure rather than changing the configured step.
 - Optional laminar viscous stresses and Fourier heat conduction, using
   constant dynamic viscosity or Sutherland's law and conductivity derived from
   the Prandtl number. Constant body acceleration is configurable in both
@@ -49,7 +51,10 @@ The current version provides:
 - Persistence of the final cell-centered solution in the case file, so a saved
   run can be reopened and visualized without running the solver again.
 - Repeated runs continue from the current solution and accumulated simulation
-  time. Increase the configured end time to continue after reaching it.
+  time in global-step modes. Increase the configured end time to continue after
+  reaching it. Local stepping is a steady pseudo-time method: it uses a separate
+  CFL-derived step in each cell and stops at the residual tolerance or iteration
+  limit; the displayed pseudo-time is the mean cell step accumulated per iteration.
 - While a simulation is running, Run Solver toggles between Pause Solver and
   Resume Solver. Stop Solver ends the run at the current time-step boundary and
   keeps its partial solution. After stopping, setup changes apply to the next
@@ -104,9 +109,10 @@ with characteristic treatment for subsonic flow and the appropriate interior
 or freestream state for supersonic outflow or inflow. MUSCL parabolic fits a
 quadratic polynomial over the two-ring cell stencil and limits face values to
 the local stencil range; cells without a full-rank stencil use the linear
-reconstruction. Runs stop at the configured End time or maximum time-step
-count; the residual is reported for monitoring and does not terminate an
-unsteady run.
+reconstruction. Global time stepping stops at the configured End time or
+maximum time-step count; the residual is reported for monitoring and does not
+terminate a transient run. Local steady stepping stops when the residual
+tolerance is reached or when the maximum iteration count is reached.
 
 Viscous terms are disabled by default to preserve inviscid Euler behavior.
 Select Constant or Sutherland viscosity in Numerical Setup to add the

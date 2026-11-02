@@ -28,7 +28,7 @@ from meshcfd.core.periodic import detect_periodic_pair
 from meshcfd.io.mesh_io import load_mesh, mesh_from_dict, mesh_to_dict
 
 PROJECT_FORMAT = "meshcfd-case"
-PROJECT_VERSION = 12
+PROJECT_VERSION = 13
 
 
 def case_to_dict(
@@ -42,6 +42,13 @@ def case_to_dict(
         case.numerics.convergence_history_interval,
         "Convergence history interval",
     )
+    if case.numerics.time_step_mode not in (
+        "Global adaptive",
+        "Global fixed",
+        "Local (steady)",
+    ):
+        raise ValueError("Unsupported time-stepping mode.")
+    _positive_float(case.numerics.fixed_time_step, "Fixed time step")
     maximum_level = _positive_integer(
         case.numerics.adaptation_max_level, "Maximum adaptation level"
     )
@@ -180,7 +187,9 @@ def case_to_dict(
             "limiter": case.numerics.limiter,
             "flux": case.numerics.flux,
             "time_integration": case.numerics.time_integration,
+            "time_step_mode": case.numerics.time_step_mode,
             "cfl": case.numerics.cfl,
+            "fixed_time_step": case.numerics.fixed_time_step,
             "gmres_tolerance": case.numerics.gmres_tolerance,
             "gmres_max_iterations": case.numerics.gmres_max_iterations,
             "gmres_krylov_dimension": case.numerics.gmres_krylov_dimension,
@@ -245,6 +254,7 @@ def case_from_dict(
         9,
         10,
         11,
+        12,
         PROJECT_VERSION,
     ):
         raise ValueError(
@@ -340,7 +350,14 @@ def case_from_dict(
         time_integration=raw_numerics.get(
             "time_integration", defaults.time_integration
         ),
+        time_step_mode=raw_numerics.get(
+            "time_step_mode", defaults.time_step_mode
+        ),
         cfl=_positive_float(raw_numerics.get("cfl", defaults.cfl), "CFL"),
+        fixed_time_step=_positive_float(
+            raw_numerics.get("fixed_time_step", defaults.fixed_time_step),
+            "Fixed time step",
+        ),
         gmres_tolerance=_positive_float(
             raw_numerics.get("gmres_tolerance", defaults.gmres_tolerance),
             "GMRES tolerance",
@@ -465,6 +482,7 @@ def case_from_dict(
         ("limiter", LIMITER_SCHEMES),
         ("flux", FLUX_SCHEMES),
         ("time_integration", TIME_INTEGRATION_SCHEMES),
+        ("time_step_mode", ("Global adaptive", "Global fixed", "Local (steady)")),
         ("implicit_preconditioner", ("ILU", "LU-SGS")),
         ("viscosity_model", ("Inviscid", "Constant", "Sutherland")),
         ("turbulence_model", ("None", "Menter k-omega SST")),

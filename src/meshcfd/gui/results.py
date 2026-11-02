@@ -418,6 +418,12 @@ class ConvergenceHistoryWidget(QWidget):
         self._turbulence_group.setHidden(not enabled)
         self.refresh_plot()
 
+    def set_pseudo_time_mode(self, enabled: bool) -> None:
+        self.x_axis_combo.setItemText(
+            1, "Pseudo-time" if enabled else "Physical time"
+        )
+        self.refresh_plot()
+
     def showEvent(self, event) -> None:
         self._timer.start()
         self.refresh_plot()
@@ -433,6 +439,7 @@ class ConvergenceHistoryWidget(QWidget):
         x_index, x_label = {
             "Iteration": (0, "Iteration"),
             "Physical time": (1, "Physical time (s)"),
+            "Pseudo-time": (1, "Pseudo-time (s)"),
             "CPU time": (2, "CPU time (s)"),
         }[x_axis]
         selected = [

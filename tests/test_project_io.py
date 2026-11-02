@@ -193,6 +193,17 @@ def test_case_round_trip_preserves_new_boundary_condition_values(tmp_path):
     assert case_to_dict(restored) == case_to_dict(case)
 
 
+def test_case_round_trip_preserves_time_stepping_options():
+    case = Case()
+    case.numerics.time_step_mode = "Global fixed"
+    case.numerics.fixed_time_step = 0.0125
+
+    restored = case_from_dict(case_to_dict(case))
+
+    assert restored.numerics.time_step_mode == "Global fixed"
+    assert restored.numerics.fixed_time_step == pytest.approx(0.0125)
+
+
 def test_replacing_mesh_preserves_wall_thermal_condition():
     case = Case()
     case.set_mesh(make_mesh())
@@ -226,7 +237,7 @@ def test_case_saves_relative_mesh_reference_and_reloads_mesh(tmp_path):
     save_case(case_path, case)
 
     saved_data = json.loads(case_path.read_text(encoding="utf-8"))
-    assert saved_data["version"] == 12
+    assert saved_data["version"] == 13
     assert saved_data["mesh"] == "../mesh.json"
     assert isinstance(saved_data["mesh"], str)
 
@@ -272,7 +283,7 @@ def test_case_round_trip_preserves_final_solution(tmp_path):
     saved_data = json.loads(path.read_text(encoding="utf-8"))
     restored = load_case(path)
 
-    assert saved_data["version"] == 12
+    assert saved_data["version"] == 13
     assert saved_data["final_solution"] == [
         {
             "density": 0.9,
@@ -293,7 +304,7 @@ def test_case_round_trip_preserves_final_solution(tmp_path):
 
 def test_case_loads_without_convergence_history_or_cpu_time():
     data = case_to_dict(Case(name="legacy", mesh=make_mesh()))
-    data["version"] = 11
+    data["version"] = 12
     data["final_solution"] = [
         {
             "density": 1.0,
@@ -308,6 +319,8 @@ def test_case_loads_without_convergence_history_or_cpu_time():
     data["solution_steps"] = 3
     data.pop("solution_cpu_time")
     data.pop("convergence_history")
+    data["numerics"].pop("time_step_mode")
+    data["numerics"].pop("fixed_time_step")
 
     restored = case_from_dict(data)
 
@@ -401,7 +414,7 @@ def test_periodic_pair_detection_and_case_round_trip(tmp_path):
     assert restored.periodic_pairs == case.periodic_pairs
     assert restored.boundary_conditions[1].kind == "Periodic"
     assert restored.boundary_conditions[3].kind == "Periodic"
-    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 12
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 13
 
 
 def test_regularized_sst_formulation_round_trips(tmp_path):
@@ -416,7 +429,7 @@ def test_regularized_sst_formulation_round_trips(tmp_path):
     assert restored.numerics.turbulence_omega_formulation == (
         "Regularized k-log-omega"
     )
-    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 12
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 13
 
 
 def test_adaptive_mesh_settings_and_hierarchy_round_trip(tmp_path):

@@ -84,7 +84,9 @@ class NumericalSettings:
     limiter: str = "Barth-Jespersen"
     flux: str = "HLLC"
     time_integration: str = "Explicit RK2"
+    time_step_mode: str = "Global adaptive"
     cfl: float = 0.5
+    fixed_time_step: float = 0.001
     gmres_tolerance: float = 1e-6
     gmres_max_iterations: int = 300
     gmres_krylov_dimension: int = 30

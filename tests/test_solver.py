@@ -713,6 +713,35 @@ def test_implicit_euler_halves_time_step_until_nonlinear_solve_converges(
     np.testing.assert_array_equal(solution, state)
 
 
+def test_implicit_euler_keeps_a_fixed_time_step_on_nonlinear_failure(
+    monkeypatch,
+):
+    case = make_periodic_case()
+    geometry = _build_geometry(case.mesh, case)
+    state = primitive_to_conservative(
+        np.array(((1.0, 0.2, -0.1, 1.0),)), case.numerics.gamma
+    )
+    attempts = []
+
+    def fail_solve_once(_initial, time_step, _geometry, _settings):
+        attempts.append(time_step)
+        raise SolverError("nonlinear solve did not converge")
+
+    monkeypatch.setattr(
+        "meshcfd.core.solver._implicit_euler_solve_once", fail_solve_once
+    )
+    with pytest.raises(SolverError, match="configured fixed time step"):
+        _implicit_euler_step(
+            state,
+            0.8,
+            geometry,
+            case.numerics,
+            allow_time_step_reduction=False,
+        )
+
+    assert attempts == [0.8]
+
+
 def test_parabolic_reconstruction_recovers_quadratic_field():
     case = make_periodic_case(6, 6)
     geometry = _build_geometry(case.mesh, case)
@@ -1135,6 +1164,103 @@ def test_solver_samples_convergence_history_at_configured_interval():
         item.cpu_time for item in progress
     )
     assert result.cpu_time >= progress[-1].cpu_time
+
+
+def test_global_fixed_time_step_is_shared_and_clipped_at_end_time():
+    case = make_periodic_case()
+    case.numerics.time_step_mode = "Global fixed"
+    case.numerics.fixed_time_step = 0.002
+    case.numerics.end_time = 0.005
+    case.numerics.max_iterations = 5
+    case.numerics.convergence_history_interval = 1
+    progress = []
+
+    result = solve_case(case, (InitialState(),), progress.append)
+
+    assert result.completed
+    assert [entry.time_step for entry in progress] == pytest.approx(
+        (0.002, 0.002, 0.001)
+    )
+    assert result.time == pytest.approx(0.005)
+
+
+@pytest.mark.parametrize(
+    "time_integration",
+    ("Explicit Euler", "Explicit RK2", "Explicit RK3", "Explicit RK4"),
+)
+def test_local_time_step_advances_each_cell_with_its_own_cfl_step(
+    monkeypatch, time_integration
+):
+    case = make_periodic_case(nx=2, length_x=2.0)
+    case.numerics.time_step_mode = "Local (steady)"
+    case.numerics.time_integration = time_integration
+    case.numerics.max_iterations = 1
+    case.numerics.residual_tolerance = 1e-14
+    local_steps = np.array((0.01, 0.02))
+    rates = np.array(((0.0, 1.0, 0.0, 0.0), (0.0, 2.0, 0.0, 0.0)))
+    monkeypatch.setattr(
+        "meshcfd.core.solver._stable_time_steps",
+        lambda *_args: local_steps.copy(),
+    )
+    monkeypatch.setattr(
+        "meshcfd.core.solver._residual", lambda *_args: rates.copy()
+    )
+    progress = []
+
+    result = solve_case(
+        case,
+        (
+            InitialState(density=1.0, pressure=1.0),
+            InitialState(density=1.0, pressure=1.0),
+        ),
+        progress.append,
+    )
+
+    assert not result.completed
+    assert result.steps == 1
+    assert result.time == pytest.approx(np.mean(local_steps))
+    assert progress[0].time_step == pytest.approx(np.mean(local_steps))
+    assert [state.velocity_x for state in result.states] == pytest.approx(
+        (0.01, 0.04)
+    )
+
+
+def test_local_time_stepping_stops_when_residual_tolerance_is_reached():
+    case = make_periodic_case()
+    case.numerics.time_step_mode = "Local (steady)"
+    case.numerics.end_time = 1e-12
+
+    result = solve_case(case, (InitialState(),))
+
+    assert result.completed
+    assert result.steps == 1
+    assert result.time > case.numerics.end_time
+
+
+def test_local_time_stepping_supports_implicit_euler():
+    case = make_periodic_case(3, 2)
+    case.numerics.time_step_mode = "Local (steady)"
+    case.numerics.time_integration = "Implicit Euler"
+    case.numerics.cfl = 0.1
+    case.numerics.max_iterations = 1
+    case.numerics.residual_tolerance = 1e-14
+    initial = tuple(
+        InitialState(
+            density=1.0 + 0.03 * math.sin(2 * math.pi * (i + 0.5) / 3),
+            velocity_x=0.2,
+            velocity_y=-0.1,
+            pressure=1.0 + 0.02 * math.cos(2 * math.pi * (j + 0.5) / 2),
+        )
+        for j in range(2)
+        for i in range(3)
+    )
+
+    result = solve_case(case, initial)
+
+    assert result.steps == 1
+    assert not result.completed
+    assert math.isfinite(result.time)
+    assert all(state.density > 0.0 and state.pressure > 0.0 for state in result.states)
 
 
 def test_solution_cut_samples_cell_values_in_line_order():

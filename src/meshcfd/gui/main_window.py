@@ -190,6 +190,7 @@ class MainWindow(QMainWindow):
             tuple[int, float, float, tuple[float, ...]]
         ] = []
         self._cpu_time_offset = 0.0
+        self._convergence_uses_pseudo_time = False
         self._dirty = False
         self.setMinimumSize(640, 480)
         self.resize(1400, 850)
@@ -251,6 +252,7 @@ class MainWindow(QMainWindow):
         self.convergence_history_widget = ConvergenceHistoryWidget(
             lambda: tuple(self._convergence_history), self
         )
+        self.numerics_panel.changed.connect(self._update_convergence_time_axis)
         self.convergence_history_scroll = self._create_scroll_area(
             self.convergence_history_widget
         )
@@ -605,6 +607,9 @@ class MainWindow(QMainWindow):
         self._case_revision += 1
         self.case = case
         self.current_path = path
+        self._convergence_uses_pseudo_time = (
+            case.numerics.time_step_mode == "Local (steady)"
+        )
         self._convergence_history = list(case.convergence_history)
         self._cpu_time_offset = case.solution_cpu_time
         self._simulation_solution = None
@@ -616,10 +621,29 @@ class MainWindow(QMainWindow):
         self.initial_conditions_panel.set_case(case)
         self._update_mesh_info()
         self._refresh_solution(preserve_saved_solution=True)
-        self.convergence_history_widget.refresh_plot()
+        self._update_convergence_time_axis()
         self._update_results_actions()
         self._update_title()
         self._log_output(f"Loaded case settings: {case.name}.")
+
+    def _update_convergence_time_axis(self, *_args) -> None:
+        uses_pseudo_time = self.case.numerics.time_step_mode == "Local (steady)"
+        if (
+            uses_pseudo_time != self._convergence_uses_pseudo_time
+            and self.case.final_solution is not None
+        ):
+            self.case.solution_time = 0.0
+            self.case.solution_steps = 0
+            self.case.convergence_history.clear()
+            self._convergence_history.clear()
+            self._cpu_time_offset = self.case.solution_cpu_time
+            self._log_output(
+                "Time-stepping mode changed between physical and pseudo-time; "
+                "the existing solution is retained as the new initial state and "
+                "time/iteration history has been reset."
+            )
+        self._convergence_uses_pseudo_time = uses_pseudo_time
+        self.convergence_history_widget.set_pseudo_time_mode(uses_pseudo_time)
 
     def _on_toggle_grid(self, _checked: bool) -> None:
         self.canvas.show_grid = _checked
@@ -1038,18 +1062,35 @@ class MainWindow(QMainWindow):
         self.action_stop.setEnabled(True)
         self.status_label.setText("Solver running...")
         self.output_dock.show()
+        if snapshot.numerics.time_step_mode == "Local (steady)":
+            run_limits = (
+                f"starting pseudo-time={snapshot.solution_time:g} "
+                f"(iteration {snapshot.solution_steps}), "
+                f"CFL={snapshot.numerics.cfl:g}, "
+                f"residual tolerance={snapshot.numerics.residual_tolerance:g}, "
+                f"maximum iterations={snapshot.numerics.max_iterations}."
+            )
+        else:
+            run_limits = (
+                f"starting at t={snapshot.solution_time:g} "
+                f"(step {snapshot.solution_steps}), "
+                f"CFL={snapshot.numerics.cfl:g}, "
+                f"end time={snapshot.numerics.end_time:g}, "
+                f"maximum steps={snapshot.numerics.max_iterations}."
+            )
         self._log_output(
             f"Starting {snapshot.numerics.flux} solver with "
             f"{snapshot.numerics.time_integration}, "
-            f"{snapshot.numerics.reconstruction}, "
-            f"starting at t={snapshot.solution_time:g} "
-            f"(step {snapshot.solution_steps}), "
-            f"CFL={snapshot.numerics.cfl:g}, "
-            f"end time={snapshot.numerics.end_time:g}, "
-            f"maximum steps={snapshot.numerics.max_iterations}."
+            f"{snapshot.numerics.time_step_mode.lower()} time stepping, "
+            f"{snapshot.numerics.reconstruction}, {run_limits}"
+        )
+        time_label = (
+            "Pseudo-time"
+            if snapshot.numerics.time_step_mode == "Local (steady)"
+            else "Time"
         )
         self._log_output(
-            " Iteration          Time            dt          rho         rhoU"
+            f" Iteration {time_label:>15}            dt          rho         rhoU"
             "         rhoV         rhoE"
         )
         worker.start()
@@ -1102,8 +1143,14 @@ class MainWindow(QMainWindow):
             self._log_output(residual_message, "ITER")
         worker = self._solver_worker
         if worker is not None and not worker.stop_requested:
+            time_label = (
+                "pseudo-time"
+                if self.case.numerics.time_step_mode == "Local (steady)"
+                else "t"
+            )
             self.status_label.setText(
-                f"Solver running: step {progress.step}, t = {progress.time:.6g}"
+                f"Solver running: step {progress.step}, "
+                f"{time_label} = {progress.time:.6g}"
             )
         if (
             progress.states is not None
@@ -1185,17 +1232,29 @@ class MainWindow(QMainWindow):
         self._update_results_actions()
         self._mark_dirty()
         if result.completed:
-            message = (
-                f"Completed at t = {result.time:.6g} in {result.steps} steps "
-                f"(residual {result.residual:.3e})."
-            )
+            if self.case.numerics.time_step_mode == "Local (steady)":
+                message = (
+                    f"Steady solution converged in {result.steps} iterations "
+                    f"(residual {result.residual:.3e})."
+                )
+            else:
+                message = (
+                    f"Completed at t = {result.time:.6g} in {result.steps} steps "
+                    f"(residual {result.residual:.3e})."
+                )
             self.status_label.setText(message)
             self._log_output(message)
         else:
-            message = (
-                f"Stopped at t = {result.time:.6g} after {result.steps} steps "
-                f"before end time {self.case.numerics.end_time:.6g}."
-            )
+            if self.case.numerics.time_step_mode == "Local (steady)":
+                message = (
+                    f"Steady solve reached the {result.steps}-iteration limit "
+                    f"(residual {result.residual:.3e}) without reaching tolerance."
+                )
+            else:
+                message = (
+                    f"Stopped at t = {result.time:.6g} after {result.steps} steps "
+                    f"before end time {self.case.numerics.end_time:.6g}."
+                )
             self.status_label.setText(message)
             self._log_output(message, "WARNING")
         if worker.output_error is not None:

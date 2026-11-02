@@ -46,10 +46,26 @@ class NumericsPanel(QWidget):
         form.addRow("Convective flux:", self.flux_combo)
         form.addRow("Time integration:", self.time_integration_combo)
 
+        self.time_step_mode_combo = self._combo(
+            ("Global adaptive", "Global fixed", "Local (steady)")
+        )
+        self.time_step_mode_combo.setToolTip(
+            "Global adaptive uses one CFL-limited step for all cells. Global fixed "
+            "uses the configured dt. Local (steady) uses a CFL step per cell as "
+            "pseudo-time and stops at the residual tolerance or iteration limit."
+        )
+        form.addRow("Time stepping:", self.time_step_mode_combo)
         self.cfl_spin = self._double_spin(0.001, 1000.0, 0.5, 3)
         self.cfl_spin.setToolTip(
             "Explicit methods require CFL <= 1. Implicit Euler supports larger "
             "CFL values and solves each step with matrix-free GMRES."
+        )
+        self.fixed_time_step_spin = self._double_spin(
+            1e-14, 1e6, 0.001, 12
+        )
+        self.fixed_time_step_spin.setToolTip(
+            "Fixed global time step in seconds. Stability is the user's "
+            "responsibility; reduce dt if the solution becomes unstable."
         )
         self.implicit_preconditioner_combo = self._combo(("LU-SGS", "ILU"))
         self.gmres_tolerance_spin = self._double_spin(
@@ -148,6 +164,7 @@ class NumericsPanel(QWidget):
             "requires wall-resolved treatment."
         )
         form.addRow("CFL number:", self.cfl_spin)
+        form.addRow("Fixed dt (s):", self.fixed_time_step_spin)
         form.addRow("Maximum time steps:", self.iterations_spin)
         form.addRow("End time:", self.end_time_spin)
         form.addRow("Residual tolerance:", self.residual_spin)
@@ -223,7 +240,9 @@ class NumericsPanel(QWidget):
             self.limiter_combo,
             self.flux_combo,
             self.time_integration_combo,
+            self.time_step_mode_combo,
             self.cfl_spin,
+            self.fixed_time_step_spin,
             self.implicit_preconditioner_combo,
             self.gmres_tolerance_spin,
             self.gmres_iterations_spin,
@@ -257,15 +276,20 @@ class NumericsPanel(QWidget):
         self.time_integration_combo.currentTextChanged.connect(
             self._update_implicit_controls
         )
+        self.time_step_mode_combo.currentTextChanged.connect(
+            self._update_time_step_controls
+        )
         for combo in (
             self.reconstruction_combo,
             self.limiter_combo,
             self.flux_combo,
             self.time_integration_combo,
+            self.time_step_mode_combo,
         ):
             combo.currentTextChanged.connect(self._sync_case)
         for control in (
             self.cfl_spin,
+            self.fixed_time_step_spin,
             self.gmres_tolerance_spin,
             self.iterations_spin,
             self.end_time_spin,
@@ -320,6 +344,7 @@ class NumericsPanel(QWidget):
         self._update_adaptive_controls()
         self._update_cfl_limit()
         self._update_implicit_controls()
+        self._update_time_step_controls()
 
     def _combo(self, values: tuple[str, ...]) -> QComboBox:
         combo = QComboBox(self)
@@ -344,8 +369,10 @@ class NumericsPanel(QWidget):
         self.limiter_combo.setCurrentText(settings.limiter)
         self.flux_combo.setCurrentText(settings.flux)
         self.time_integration_combo.setCurrentText(settings.time_integration)
+        self.time_step_mode_combo.setCurrentText(settings.time_step_mode)
         self._update_cfl_limit()
         self.cfl_spin.setValue(settings.cfl)
+        self.fixed_time_step_spin.setValue(settings.fixed_time_step)
         self.implicit_preconditioner_combo.setCurrentText(
             settings.implicit_preconditioner
         )
@@ -396,6 +423,7 @@ class NumericsPanel(QWidget):
         self._update_turbulence_controls()
         self._update_adaptive_controls()
         self._update_implicit_controls()
+        self._update_time_step_controls()
 
     def _sync_case(self, *_args) -> None:
         settings = self._case.numerics
@@ -403,7 +431,9 @@ class NumericsPanel(QWidget):
         settings.limiter = self.limiter_combo.currentText()
         settings.flux = self.flux_combo.currentText()
         settings.time_integration = self.time_integration_combo.currentText()
+        settings.time_step_mode = self.time_step_mode_combo.currentText()
         settings.cfl = self.cfl_spin.value()
+        settings.fixed_time_step = self.fixed_time_step_spin.value()
         settings.implicit_preconditioner = (
             self.implicit_preconditioner_combo.currentText()
         )
@@ -509,3 +539,30 @@ class NumericsPanel(QWidget):
             label = self.layout().labelForField(control)
             if label is not None:
                 label.setVisible(visible)
+
+    def _update_time_step_controls(self, *_args) -> None:
+        mode = self.time_step_mode_combo.currentText()
+        local = mode == "Local (steady)"
+        fixed = mode == "Global fixed"
+        for control, visible in (
+            (self.cfl_spin, not fixed),
+            (self.fixed_time_step_spin, fixed),
+            (self.end_time_spin, not local),
+            (self.residual_spin, local),
+        ):
+            control.setVisible(visible)
+            label = self.layout().labelForField(control)
+            if label is not None:
+                label.setVisible(visible)
+        self.end_time_spin.setToolTip(
+            "Not used for local steady pseudo-time stepping."
+            if local
+            else "Absolute simulation end time. Increase it to continue a run "
+            "that has already reached its current end time."
+        )
+        self.residual_spin.setToolTip(
+            "The local steady solve stops when the residual reaches this tolerance."
+            if local
+            else "Residual is reported for monitoring; transient runs stop at End time "
+            "or Maximum time steps."
+        )

@@ -161,7 +161,7 @@ def solve_case(
     solution_interval: int = 1,
     cpu_time_offset: float = 0.0,
 ) -> SolverResult:
-    """Advance a case from its current time to its end time or iteration limit."""
+    """Advance a transient case or iterate a steady pseudo-time solution."""
     cpu_start = thread_time()
     if case.mesh is None:
         raise SolverError("Import a mesh before running the solver.")
@@ -191,6 +191,20 @@ def solve_case(
         raise SolverError(
             f"Unsupported time integration '{settings.time_integration}'."
         )
+    if settings.time_step_mode not in (
+        "Global adaptive",
+        "Global fixed",
+        "Local (steady)",
+    ):
+        raise SolverError(f"Unsupported time-stepping mode '{settings.time_step_mode}'.")
+    local_steady = settings.time_step_mode == "Local (steady)"
+    if not math.isfinite(settings.fixed_time_step) or settings.fixed_time_step <= 0.0:
+        raise SolverError("Fixed time step must be positive and finite.")
+    if (
+        not math.isfinite(settings.residual_tolerance)
+        or settings.residual_tolerance <= 0.0
+    ):
+        raise SolverError("Residual tolerance must be positive and finite.")
     maximum_cfl = 1000.0 if settings.time_integration == "Implicit Euler" else 1.0
     if not math.isfinite(settings.cfl) or not 0.0 < settings.cfl <= maximum_cfl:
         raise SolverError(
@@ -216,11 +230,14 @@ def solve_case(
             raise SolverError(f"{label} must be a positive integer.")
     if settings.implicit_preconditioner not in ("ILU", "LU-SGS"):
         raise SolverError("Unsupported implicit preconditioner.")
-    if not math.isfinite(settings.end_time) or settings.end_time <= 0.0:
+    if (
+        not local_steady
+        and (not math.isfinite(settings.end_time) or settings.end_time <= 0.0)
+    ):
         raise SolverError("End time must be positive and finite.")
     if not math.isfinite(start_time) or start_time < 0.0:
         raise SolverError("Current solution time must be finite and non-negative.")
-    if start_time >= settings.end_time:
+    if not local_steady and start_time >= settings.end_time:
         raise SolverError(
             "End time must be greater than the current solution time to continue."
         )
@@ -398,12 +415,23 @@ def solve_case(
             primitive = _primitive_from_conservative(
                 conservative, turbulence_conservative, settings.gamma
             )
-            time_step = min(
-                _stable_time_step(
+            if local_steady:
+                step_sizes = _stable_time_steps(
                     primitive, geometry, settings, turbulence_conservative
-                ),
-                settings.end_time - time,
-            )
+                )
+                time_step = float(np.mean(step_sizes))
+            elif settings.time_step_mode == "Global fixed":
+                step_sizes = settings.fixed_time_step
+                time_step = min(step_sizes, settings.end_time - time)
+                step_sizes = time_step
+            else:
+                time_step = min(
+                    _stable_time_step(
+                        primitive, geometry, settings, turbulence_conservative
+                    ),
+                    settings.end_time - time,
+                )
+                step_sizes = time_step
             if not math.isfinite(time_step) or time_step <= 0.0:
                 raise SolverError("The stable time step is non-positive or non-finite.")
             start = conservative
@@ -433,8 +461,16 @@ def solve_case(
                     start, start_turbulence, regularized_omega
                 )
                 updated_state, time_step = _implicit_euler_step(
-                    packed_state, time_step, geometry, settings
+                    packed_state,
+                    step_sizes,
+                    geometry,
+                    settings,
+                    allow_time_step_reduction=(
+                        settings.time_step_mode != "Global fixed"
+                    ),
                 )
+                step_sizes = time_step
+                time_step = float(np.mean(np.asarray(step_sizes)))
                 (
                     conservative,
                     turbulence_conservative,
@@ -451,7 +487,7 @@ def solve_case(
                     start, start_turbulence, regularized_omega
                 )
                 updated_state = _explicit_rk4_step(
-                    packed_state, time_step, geometry, settings
+                    packed_state, step_sizes, geometry, settings
                 )
                 (
                     conservative,
@@ -465,17 +501,21 @@ def solve_case(
                     regularized_omega is not None,
                 )
             elif settings.time_integration == "Explicit Euler":
-                conservative = start + time_step * derivative
+                conservative = start + _scale_cell_rate(derivative, step_sizes)
                 if start_turbulence is not None:
                     updated_k = np.maximum(
                         start_turbulence[:, 0]
-                        + time_step * turbulence_derivative[:, 0],
+                        + _scale_cell_rate(
+                            turbulence_derivative[:, 0], step_sizes
+                        ),
                         0.0,
                     )
                     if regularized_omega is not None:
                         regularized_omega = (
                             regularized_omega
-                            + time_step * omega_variable_derivative
+                            + _scale_cell_rate(
+                                omega_variable_derivative, step_sizes
+                            )
                         )
                         updated_primitive = _primitive_from_conservative(
                             conservative,
@@ -491,22 +531,27 @@ def solve_case(
                         )
                     else:
                         turbulence_conservative = _positive_turbulence_state(
-                            start_turbulence + time_step * turbulence_derivative
+                            start_turbulence
+                            + _scale_cell_rate(turbulence_derivative, step_sizes)
                         )
             else:
-                stage_one = start + time_step * derivative
+                stage_one = start + _scale_cell_rate(derivative, step_sizes)
                 stage_one_turbulence = None
                 stage_one_omega_variable = None
                 if start_turbulence is not None:
                     stage_one_k = np.maximum(
                         start_turbulence[:, 0]
-                        + time_step * turbulence_derivative[:, 0],
+                        + _scale_cell_rate(
+                            turbulence_derivative[:, 0], step_sizes
+                        ),
                         0.0,
                     )
                     if regularized_omega is not None:
                         stage_one_omega_variable = (
                             regularized_omega
-                            + time_step * omega_variable_derivative
+                            + _scale_cell_rate(
+                                omega_variable_derivative, step_sizes
+                            )
                         )
                         stage_one_primitive = _primitive_from_conservative(
                             stage_one,
@@ -525,7 +570,7 @@ def solve_case(
                     else:
                         stage_one_turbulence = _positive_turbulence_state(
                             start_turbulence
-                            + time_step * turbulence_derivative
+                            + _scale_cell_rate(turbulence_derivative, step_sizes)
                         )
                 stage_one_primitive = _primitive_from_conservative(
                     stage_one, stage_one_turbulence, settings.gamma
@@ -550,7 +595,7 @@ def solve_case(
                         )
                 if settings.time_integration == "Explicit RK2":
                     conservative = 0.5 * start + 0.5 * (
-                        stage_one + time_step * derivative_one
+                        stage_one + _scale_cell_rate(derivative_one, step_sizes)
                     )
                     if start_turbulence is not None:
                         updated_k = np.maximum(
@@ -558,14 +603,18 @@ def solve_case(
                             + 0.5
                             * (
                                 stage_one_turbulence[:, 0]
-                                + time_step * turbulence_derivative_one[:, 0]
+                                + _scale_cell_rate(
+                                    turbulence_derivative_one[:, 0], step_sizes
+                                )
                             ),
                             0.0,
                         )
                         if regularized_omega is not None:
                             regularized_omega = 0.5 * regularized_omega + 0.5 * (
                                 stage_one_omega_variable
-                                + time_step * omega_variable_derivative_one
+                                + _scale_cell_rate(
+                                    omega_variable_derivative_one, step_sizes
+                                )
                             )
                             updated_primitive = _primitive_from_conservative(
                                 conservative,
@@ -589,12 +638,14 @@ def solve_case(
                                 + 0.5
                                 * (
                                     stage_one_turbulence
-                                    + time_step * turbulence_derivative_one
+                                    + _scale_cell_rate(
+                                        turbulence_derivative_one, step_sizes
+                                    )
                                 )
                             )
                 else:
                     stage_two = 0.75 * start + 0.25 * (
-                        stage_one + time_step * derivative_one
+                        stage_one + _scale_cell_rate(derivative_one, step_sizes)
                     )
                     stage_two_turbulence = None
                     stage_two_omega_variable = None
@@ -604,7 +655,9 @@ def solve_case(
                             + 0.25
                             * (
                                 stage_one_turbulence[:, 0]
-                                + time_step * turbulence_derivative_one[:, 0]
+                                + _scale_cell_rate(
+                                    turbulence_derivative_one[:, 0], step_sizes
+                                )
                             ),
                             0.0,
                         )
@@ -614,8 +667,9 @@ def solve_case(
                                 + 0.25
                                 * (
                                     stage_one_omega_variable
-                                    + time_step
-                                    * omega_variable_derivative_one
+                                    + _scale_cell_rate(
+                                        omega_variable_derivative_one, step_sizes
+                                    )
                                 )
                             )
                             stage_two_primitive = _primitive_from_conservative(
@@ -640,7 +694,9 @@ def solve_case(
                                 + 0.25
                                 * (
                                     stage_one_turbulence
-                                    + time_step * turbulence_derivative_one
+                                    + _scale_cell_rate(
+                                        turbulence_derivative_one, step_sizes
+                                    )
                                 )
                             )
                     stage_two_primitive = _primitive_from_conservative(
@@ -667,7 +723,7 @@ def solve_case(
                                 )
                             )
                     conservative = (1.0 / 3.0) * start + (2.0 / 3.0) * (
-                        stage_two + time_step * derivative_two
+                        stage_two + _scale_cell_rate(derivative_two, step_sizes)
                     )
                     if start_turbulence is not None:
                         updated_k = np.maximum(
@@ -675,7 +731,9 @@ def solve_case(
                             + (2.0 / 3.0)
                             * (
                                 stage_two_turbulence[:, 0]
-                                + time_step * turbulence_derivative_two[:, 0]
+                                + _scale_cell_rate(
+                                    turbulence_derivative_two[:, 0], step_sizes
+                                )
                             ),
                             0.0,
                         )
@@ -685,7 +743,9 @@ def solve_case(
                                 + (2.0 / 3.0)
                                 * (
                                     stage_two_omega_variable
-                                    + time_step * omega_variable_derivative_two
+                                    + _scale_cell_rate(
+                                        omega_variable_derivative_two, step_sizes
+                                    )
                                 )
                             )
                             updated_primitive = _primitive_from_conservative(
@@ -710,7 +770,9 @@ def solve_case(
                                 + (2.0 / 3.0)
                                 * (
                                     stage_two_turbulence
-                                    + time_step * turbulence_derivative_two
+                                    + _scale_cell_rate(
+                                        turbulence_derivative_two, step_sizes
+                                    )
                                 )
                             )
             _primitive_from_conservative(
@@ -775,8 +837,34 @@ def solve_case(
                         adapted_mesh = mesh
             except (ValueError, FloatingPointError, np.linalg.LinAlgError) as error:
                 raise SolverError(f"Adaptive mesh update failed at step {step}: {error}") from error
+        steady_converged = False
+        if local_steady:
+            current_primitive = _primitive_from_conservative(
+                conservative, turbulence_conservative, settings.gamma
+            )
+            derivative = _residual(
+                conservative, geometry, settings, turbulence_conservative
+            )
+            residual_components = [derivative.ravel()]
+            if turbulence_conservative is not None:
+                turbulence_derivative = _sst_residual(
+                    current_primitive,
+                    turbulence_conservative / current_primitive[:, :1],
+                    geometry,
+                    settings,
+                )
+                residual_components.append(turbulence_derivative.ravel())
+            steady_residual = float(
+                np.sqrt(np.mean(np.concatenate(residual_components) ** 2))
+            )
+            steady_converged = steady_residual <= settings.residual_tolerance
+        end_time_reached = (
+            not local_steady
+            and time >= settings.end_time * (1.0 - 1e-13)
+        )
         final_step = (
-            time >= settings.end_time * (1.0 - 1e-13)
+            end_time_reached
+            or steady_converged
             or local_step == settings.max_iterations
             or (
                 cancel_callback is not None and cancel_callback()
@@ -797,7 +885,8 @@ def solve_case(
                 and (
                     local_step == 1
                     or step % 10 == 0
-                    or time >= settings.end_time * (1.0 - 1e-13)
+                    or end_time_reached
+                    or steady_converged
                     or local_step == settings.max_iterations
                 )
             ) or adapted_mesh is not None:
@@ -842,8 +931,11 @@ def solve_case(
                     snapshot_primitive, turbulence_conservative
                 )
             solution_callback(step, time, snapshot_states)
-        if time >= settings.end_time * (1.0 - 1e-13):
+        if end_time_reached:
             time = settings.end_time
+            completed = True
+            break
+        if steady_converged:
             completed = True
             break
 
@@ -976,34 +1068,43 @@ def _limit_time_state(
     return result
 
 
+def _scale_cell_rate(rate: np.ndarray, time_step: float | np.ndarray) -> np.ndarray:
+    if np.ndim(time_step) == 0:
+        return time_step * rate
+    step_sizes = np.asarray(time_step, dtype=float)
+    if rate.ndim == 1:
+        return step_sizes * rate
+    return step_sizes[:, None] * rate
+
+
 def _explicit_rk4_step(
     state: np.ndarray,
-    time_step: float,
+    time_step: float | np.ndarray,
     geometry: _Geometry,
     settings: NumericalSettings,
 ) -> np.ndarray:
     initial = _limit_time_state(state, settings)
     derivative_one = _time_state_rhs(initial, geometry, settings)
     stage_two = _limit_time_state(
-        initial + 0.5 * time_step * derivative_one, settings
+        initial + _scale_cell_rate(derivative_one, 0.5 * time_step), settings
     )
     derivative_two = _time_state_rhs(stage_two, geometry, settings)
     stage_three = _limit_time_state(
-        initial + 0.5 * time_step * derivative_two, settings
+        initial + _scale_cell_rate(derivative_two, 0.5 * time_step), settings
     )
     derivative_three = _time_state_rhs(stage_three, geometry, settings)
     stage_four = _limit_time_state(
-        initial + time_step * derivative_three, settings
+        initial + _scale_cell_rate(derivative_three, time_step), settings
     )
     derivative_four = _time_state_rhs(stage_four, geometry, settings)
     return _limit_time_state(
         initial
-        + (time_step / 6.0)
-        * (
+        + _scale_cell_rate(
             derivative_one
             + 2.0 * derivative_two
             + 2.0 * derivative_three
-            + derivative_four
+            + derivative_four,
+            time_step / 6.0,
         ),
         settings,
     )
@@ -1013,7 +1114,7 @@ def _implicit_preconditioner(
     primitive: np.ndarray,
     geometry: _Geometry,
     settings: NumericalSettings,
-    time_step: float,
+    time_step: float | np.ndarray,
     variable_count: int,
 ) -> LinearOperator:
     cell_count = len(primitive)
@@ -1022,6 +1123,11 @@ def _implicit_preconditioner(
     columns = list(range(cell_count))
     entries = [1.0] * cell_count
     sound_speed = _sound_speed(primitive, settings.gamma)
+    step_sizes = (
+        np.full(cell_count, time_step, dtype=float)
+        if np.ndim(time_step) == 0
+        else np.asarray(time_step, dtype=float)
+    )
 
     def add_interior_faces(faces: np.ndarray) -> None:
         if not len(faces):
@@ -1038,15 +1144,29 @@ def _implicit_preconditioner(
             np.abs(normal_velocity_owner) + sound_speed[owners],
             np.abs(normal_velocity_neighbour) + sound_speed[neighbours],
         )
-        coefficients = 0.5 * time_step * radius * geometry.face_lengths[faces]
-        np.add.at(diagonal, owners, coefficients / geometry.areas[owners])
-        np.add.at(diagonal, neighbours, coefficients / geometry.areas[neighbours])
+        coefficients = 0.5 * radius * geometry.face_lengths[faces]
+        owner_coefficients = step_sizes[owners] * coefficients
+        neighbour_coefficients = step_sizes[neighbours] * coefficients
+        np.add.at(
+            diagonal,
+            owners,
+            owner_coefficients / geometry.areas[owners],
+        )
+        np.add.at(
+            diagonal,
+            neighbours,
+            neighbour_coefficients / geometry.areas[neighbours],
+        )
         rows.extend(owners.tolist())
         columns.extend(neighbours.tolist())
-        entries.extend((-coefficients / geometry.areas[owners]).tolist())
+        entries.extend(
+            (-owner_coefficients / geometry.areas[owners]).tolist()
+        )
         rows.extend(neighbours.tolist())
         columns.extend(owners.tolist())
-        entries.extend((-coefficients / geometry.areas[neighbours]).tolist())
+        entries.extend(
+            (-neighbour_coefficients / geometry.areas[neighbours]).tolist()
+        )
 
     add_interior_faces(geometry.interior_faces)
     if len(geometry.periodic_faces_a):
@@ -1064,17 +1184,25 @@ def _implicit_preconditioner(
             np.abs(normal_velocity_a) + sound_speed[owners_a],
             np.abs(normal_velocity_b) + sound_speed[owners_b],
         )
-        coefficients = (
-            0.5 * time_step * radius * geometry.face_lengths[faces_a]
+        coefficients = 0.5 * radius * geometry.face_lengths[faces_a]
+        coefficients_a = step_sizes[owners_a] * coefficients
+        coefficients_b = step_sizes[owners_b] * coefficients
+        np.add.at(
+            diagonal, owners_a, coefficients_a / geometry.areas[owners_a]
         )
-        np.add.at(diagonal, owners_a, coefficients / geometry.areas[owners_a])
-        np.add.at(diagonal, owners_b, coefficients / geometry.areas[owners_b])
+        np.add.at(
+            diagonal, owners_b, coefficients_b / geometry.areas[owners_b]
+        )
         rows.extend(owners_a.tolist())
         columns.extend(owners_b.tolist())
-        entries.extend((-coefficients / geometry.areas[owners_a]).tolist())
+        entries.extend(
+            (-coefficients_a / geometry.areas[owners_a]).tolist()
+        )
         rows.extend(owners_b.tolist())
         columns.extend(owners_a.tolist())
-        entries.extend((-coefficients / geometry.areas[owners_b]).tolist())
+        entries.extend(
+            (-coefficients_b / geometry.areas[owners_b]).tolist()
+        )
 
     boundary_faces = np.flatnonzero(geometry.neighbours < 0)
     if len(boundary_faces):
@@ -1092,7 +1220,7 @@ def _implicit_preconditioner(
         np.add.at(
             diagonal,
             owners,
-            time_step
+            step_sizes[owners]
             * radius
             * geometry.face_lengths[boundary_faces]
             / geometry.areas[owners],
@@ -1136,13 +1264,19 @@ def _implicit_preconditioner(
 
 def _implicit_euler_step(
     initial: np.ndarray,
-    time_step: float,
+    time_step: float | np.ndarray,
     geometry: _Geometry,
     settings: NumericalSettings,
-) -> tuple[np.ndarray, float]:
-    attempted_time_step = time_step
+    allow_time_step_reduction: bool = True,
+) -> tuple[np.ndarray, float | np.ndarray]:
+    attempted_time_step = (
+        float(time_step)
+        if np.ndim(time_step) == 0
+        else np.asarray(time_step, dtype=float).copy()
+    )
     last_error: SolverError | None = None
-    for _ in range(12):
+    attempts = 12 if allow_time_step_reduction else 1
+    for _ in range(attempts):
         try:
             solution = _implicit_euler_solve_once(
                 initial, attempted_time_step, geometry, settings
@@ -1151,6 +1285,11 @@ def _implicit_euler_step(
         except SolverError as error:
             last_error = error
             attempted_time_step *= 0.5
+    if not allow_time_step_reduction:
+        raise SolverError(
+            "Implicit Euler could not converge at the configured fixed time step: "
+            f"{last_error}"
+        ) from last_error
     raise SolverError(
         "Implicit Euler could not converge after reducing the time step "
         f"12 times; last failure: {last_error}"
@@ -1159,7 +1298,7 @@ def _implicit_euler_step(
 
 def _implicit_euler_solve_once(
     initial: np.ndarray,
-    time_step: float,
+    time_step: float | np.ndarray,
     geometry: _Geometry,
     settings: NumericalSettings,
 ) -> np.ndarray:
@@ -1203,7 +1342,7 @@ def _implicit_euler_solve_once(
 
     def evaluate(candidate: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         rate = _time_state_rhs(candidate, geometry, settings)
-        equation = candidate - initial - time_step * rate
+        equation = candidate - initial - _scale_cell_rate(rate, time_step)
         return rate, equation
 
     for _ in range(12):
@@ -1322,7 +1461,7 @@ def _matrix_free_implicit_operator(
     state: np.ndarray,
     rate: np.ndarray,
     scale_grid: np.ndarray,
-    time_step: float,
+    time_step: float | np.ndarray,
     geometry: _Geometry,
     settings: NumericalSettings,
 ) -> LinearOperator:
@@ -1346,7 +1485,10 @@ def _matrix_free_implicit_operator(
             settings,
         )
         jacobian_vector = (perturbed_rate - rate) / epsilon
-        return (direction - time_step * jacobian_vector / scale_grid).ravel()
+        return (
+            direction
+            - _scale_cell_rate(jacobian_vector, time_step) / scale_grid
+        ).ravel()
 
     return LinearOperator(
         (state.size, state.size), matvec=matrix_vector, dtype=float
@@ -3803,6 +3945,21 @@ def _stable_time_step(
     settings: NumericalSettings,
     turbulence_conservative: np.ndarray | None = None,
 ) -> float:
+    return float(
+        np.min(
+            _stable_time_steps(
+                primitive, geometry, settings, turbulence_conservative
+            )
+        )
+    )
+
+
+def _stable_time_steps(
+    primitive: np.ndarray,
+    geometry: _Geometry,
+    settings: NumericalSettings,
+    turbulence_conservative: np.ndarray | None = None,
+) -> np.ndarray:
     gamma = settings.gamma
     normal_velocity = np.sum(
         primitive[geometry.owners, 1:3] * geometry.face_normals, axis=1
@@ -4005,7 +4162,10 @@ def _stable_time_step(
                 * 0.075
                 * turbulence[:, 1]
             )
-    return float(np.min(settings.cfl * geometry.areas / spectral_sum))
+    time_steps = settings.cfl * geometry.areas / spectral_sum
+    if not np.isfinite(time_steps).all() or np.any(time_steps <= 0.0):
+        raise SolverError("Local stable time steps must be positive and finite.")
+    return time_steps
 
 
 def _sound_speed(primitive: np.ndarray, gamma: float) -> np.ndarray:

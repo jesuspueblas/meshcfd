@@ -134,6 +134,46 @@ def test_implicit_integrator_enables_large_cfl_only_for_implicit(qtbot):
     assert window.case.numerics.cfl == pytest.approx(1.0)
 
 
+def test_time_step_mode_controls_and_case_settings(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    panel = window.numerics_panel
+
+    panel.time_step_mode_combo.setCurrentText("Global fixed")
+    panel.fixed_time_step_spin.setValue(0.025)
+    assert not panel.fixed_time_step_spin.isHidden()
+    assert panel.cfl_spin.isHidden()
+    assert window.case.numerics.time_step_mode == "Global fixed"
+    assert window.case.numerics.fixed_time_step == pytest.approx(0.025)
+
+    panel.time_step_mode_combo.setCurrentText("Local (steady)")
+    assert panel.end_time_spin.isHidden()
+    assert not panel.residual_spin.isHidden()
+    assert window.case.numerics.time_step_mode == "Local (steady)"
+
+
+def test_switching_between_physical_and_pseudo_time_resets_time_history(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    case = Case()
+    case.set_mesh(make_mesh())
+    case.final_solution = (InitialState(),)
+    case.solution_time = 0.5
+    case.solution_steps = 20
+    case.solution_cpu_time = 3.0
+    case.convergence_history = [(10, 0.25, 1.5, (0.4, 0.3, 0.2, 0.1))]
+    window._set_case(case, None)
+
+    window.numerics_panel.time_step_mode_combo.setCurrentText("Local (steady)")
+
+    assert window.case.final_solution == case.final_solution
+    assert window.case.solution_time == 0.0
+    assert window.case.solution_steps == 0
+    assert window.case.convergence_history == []
+    assert window.case.solution_cpu_time == 3.0
+    assert window.convergence_history_widget.x_axis_combo.itemText(1) == "Pseudo-time"
+
+
 def test_adaptive_mesh_controls_update_numerical_settings(qtbot):
     window = MainWindow()
     qtbot.addWidget(window)
@@ -232,6 +272,10 @@ def test_result_widgets_prepare_convergence_and_cut_plot_data(qtbot):
     convergence.x_axis_combo.setCurrentText("CPU time")
     assert convergence.plot.x_values == (0.025,)
     assert convergence.plot.canvas.x_label == "CPU time (s)"
+    convergence.set_pseudo_time_mode(True)
+    convergence.x_axis_combo.setCurrentText("Pseudo-time")
+    assert convergence.plot.x_values == (0.1,)
+    assert convergence.plot.canvas.x_label == "Pseudo-time (s)"
 
     history[:] = [(2, 0.2, 0.05, (0.4, 0.3, 0.2, 0.1))]
     convergence.refresh_plot()
