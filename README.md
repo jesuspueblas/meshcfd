@@ -25,6 +25,8 @@ The current version provides:
   clamping outside the selected range, and optional smooth coloring.
 - Visualization of Mach number, total (stagnation) pressure, temperature and
   density, plus y+ at the first cell centers adjacent to no-slip walls.
+- SST visualization also includes wall distance; the regularized SST omega
+  formulation additionally exposes log(omega/omega_wall).
 - Default solution-view setup: Density, Rainbow palette, linear scale,
   automatic range, and a visible vertical color legend.
 - Initial numerical controls for MUSCL reconstruction, limiters, fluxes, and
@@ -133,6 +135,10 @@ zero. These first-cell values are useful for checking near-wall resolution.
 For SST with wall functions, the friction velocity uses the solver's
 equilibrium log-law estimate; otherwise it uses the local linear wall shear
 estimate. y+ is not meaningful for inviscid or slip-wall cases.
+For SST, the viewer also provides the solver's cell-centered distance to the
+nearest no-slip wall. When the regularized k-log-omega formulation is active
+with a viscous model, it exposes the evolved regularized variable
+log(omega/omega_wall).
 
 The Results menu exports the latest completed or partial solution as an ASCII
 VTU file, configures incremental VTU snapshots collected in a PVD time series,

@@ -3,7 +3,7 @@ from PyQt5.QtCore import QEvent, QPoint, QPointF, Qt
 from PyQt5.QtGui import QColor, QMouseEvent
 from PyQt5.QtWidgets import QApplication, QGraphicsPixmapItem, QGraphicsPolygonItem
 
-from meshcfd.core.model import FiniteVolumeMesh, InitialState, MeshPatch
+from meshcfd.core.model import Case, FiniteVolumeMesh, InitialState, MeshPatch
 from meshcfd.gui.canvas import COLOR_MAPS, ColorLegend, MeshCanvas, color_values
 
 
@@ -262,6 +262,41 @@ def test_visualization_panel_selects_solution_field_and_reports_invalid_log_scal
     panel.variable_combo.setCurrentText("Pressure")
     assert window.canvas.solution is not None
     assert window.canvas.color_scale == "Logarithmic"
+
+
+def test_sst_wall_fields_are_available_only_for_their_formulation(qtbot):
+    from meshcfd.gui.main_window import MainWindow
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    case = Case()
+    case.set_mesh(make_mesh())
+    case.numerics.viscosity_model = "Constant"
+    case.numerics.dynamic_viscosity = 1e-3
+    case.numerics.turbulence_model = "Menter k-omega SST"
+    window._set_case(case, None)
+
+    panel = window.visualization_panel
+    variables = {
+        panel.variable_combo.itemText(index)
+        for index in range(panel.variable_combo.count())
+    }
+    assert "Wall distance" in variables
+    assert "Regularized log(omega)" not in variables
+
+    case.numerics.turbulence_omega_formulation = "Regularized k-log-omega"
+    window._update_visualization()
+    variables = {
+        panel.variable_combo.itemText(index)
+        for index in range(panel.variable_combo.count())
+    }
+    assert "Wall distance" in variables
+    assert "Regularized log(omega)" in variables
+
+    panel.variable_combo.setCurrentText("Wall distance")
+    assert window.canvas._solution_values("Wall distance") == (0.5,)
+    panel.variable_combo.setCurrentText("Regularized log(omega)")
+    assert len(window.canvas._solution_values("Regularized log(omega)")) == 1
 
 
 def test_manual_range_controls_update_canvas_and_legend(qtbot):

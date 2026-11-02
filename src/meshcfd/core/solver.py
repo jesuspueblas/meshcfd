@@ -1877,6 +1877,20 @@ def derive_solution_fields(
         "total_density": total_density,
         "y_plus": y_plus,
     }
+    if settings.turbulence_model == "Menter k-omega SST":
+        geometry = _build_geometry(case.mesh, case)
+        fields["wall_distance"] = geometry.wall_distances
+        if settings.turbulence_omega_formulation == "Regularized k-log-omega":
+            turbulence_omega = np.asarray(
+                [state.turbulence_omega for state in states], dtype=float
+            )
+            wall_scale = _sst_omega_wall_scale(
+                primitive, geometry.wall_distances, settings
+            )
+            with np.errstate(divide="ignore", invalid="ignore"):
+                fields["log_regularized_omega"] = (
+                    np.log(turbulence_omega) - np.log(wall_scale)
+                )
     if any(not np.isfinite(values).all() for values in fields.values()):
         raise SolverError("Derived solution fields contain non-finite values.")
     return {

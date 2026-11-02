@@ -80,7 +80,27 @@ SOLUTION_VARIABLES = {
     "Total temperature": "total_temperature",
     "Total density": "total_density",
     "y+ (wall distance)": "y_plus",
+    "Wall distance": "wall_distance",
+    "Regularized log(omega)": "log_regularized_omega",
 }
+
+
+def available_solution_variables(
+    turbulence_model: str, omega_formulation: str, viscosity_model: str
+) -> tuple[str, ...]:
+    variables = [
+        name
+        for name in SOLUTION_VARIABLES
+        if name not in ("Wall distance", "Regularized log(omega)")
+    ]
+    if turbulence_model == "Menter k-omega SST":
+        variables.append("Wall distance")
+        if (
+            omega_formulation == "Regularized k-log-omega"
+            and viscosity_model != "Inviscid"
+        ):
+            variables.append("Regularized log(omega)")
+    return tuple(variables)
 
 
 def _palette_color(position: float, palette: str) -> QColor:

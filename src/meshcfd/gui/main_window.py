@@ -39,7 +39,7 @@ from meshcfd.core.solver import (
     solve_case,
 )
 from meshcfd.gui.boundary_panel import BoundaryPanel
-from meshcfd.gui.canvas import MeshCanvas
+from meshcfd.gui.canvas import MeshCanvas, available_solution_variables
 from meshcfd.gui.initial_conditions_panel import InitialConditionsPanel
 from meshcfd.gui.numerics_panel import NumericsPanel
 from meshcfd.gui.results import ConvergenceHistoryWidget, CutProfileWidget
@@ -663,6 +663,13 @@ class MainWindow(QMainWindow):
         self._update_results_actions()
 
     def _update_visualization(self, *_) -> None:
+        available_variables = available_solution_variables(
+            self.case.numerics.turbulence_model,
+            self.case.numerics.turbulence_omega_formulation,
+            self.case.numerics.viscosity_model,
+        )
+        self.visualization_panel.set_available_variables(available_variables)
+        self.cut_profile_widget.set_available_variables(available_variables)
         variable = self.visualization_panel.variable_combo.currentText()
         palette = self.visualization_panel.palette_combo.currentText()
         solution = self._simulation_solution or self._initial_solution

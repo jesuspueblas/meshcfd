@@ -510,6 +510,21 @@ class CutProfileWidget(QWidget):
             )
         self.plot_cut()
 
+    def set_available_variables(self, variables: Sequence[str]) -> None:
+        if tuple(
+            self.field_combo.itemText(index)
+            for index in range(self.field_combo.count())
+        ) == tuple(variables):
+            return
+        selected = self.field_combo.currentText()
+        signals_were_blocked = self.field_combo.blockSignals(True)
+        self.field_combo.clear()
+        self.field_combo.addItems(variables)
+        self.field_combo.setCurrentText(
+            selected if selected in variables else "Density"
+        )
+        self.field_combo.blockSignals(signals_were_blocked)
+
     @staticmethod
     def _coordinate_spin() -> QDoubleSpinBox:
         spin = QDoubleSpinBox()

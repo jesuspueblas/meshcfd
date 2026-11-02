@@ -128,7 +128,8 @@ class VisualizationPanel(QWidget):
         self.variable_combo = self._combo(SOLUTION_VARIABLES, 140)
         self.variable_combo.setToolTip(
             "Includes Mach number, stagnation properties, and y+ at the first "
-            "cell centers adjacent to no-slip walls."
+            "cell centers adjacent to no-slip walls. SST also provides wall "
+            "distance and, for the regularized formulation, regularized log(omega)."
         )
         self.palette_combo = self._combo(COLOR_MAPS, 105)
         self.palette_combo.setCurrentText("Rainbow")
@@ -190,6 +191,21 @@ class VisualizationPanel(QWidget):
         self.orientation_combo.currentTextChanged.connect(self.changed.emit)
         self.minimum_spin.valueChanged.connect(self.changed.emit)
         self.maximum_spin.valueChanged.connect(self.changed.emit)
+
+    def set_available_variables(self, variables: tuple[str, ...]) -> None:
+        if tuple(
+            self.variable_combo.itemText(index)
+            for index in range(self.variable_combo.count())
+        ) == variables:
+            return
+        selected = self.variable_combo.currentText()
+        signals_were_blocked = self.variable_combo.blockSignals(True)
+        self.variable_combo.clear()
+        self.variable_combo.addItems(variables)
+        self.variable_combo.setCurrentText(
+            selected if selected in variables else "Density"
+        )
+        self.variable_combo.blockSignals(signals_were_blocked)
 
     def _set_interaction_mode(self, mode: str, checked: bool) -> None:
         if checked and self.interaction_mode != mode:

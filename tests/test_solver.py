@@ -356,6 +356,27 @@ def test_derived_stagnation_fields_and_mach_number():
     assert fields["total_density"][0] == pytest.approx(total_factor**2.5)
 
 
+def test_sst_derived_fields_include_wall_distance_and_regularized_log_omega():
+    case = make_periodic_case()
+    case.periodic_pairs.clear()
+    for boundary in case.boundary_conditions:
+        boundary.kind = "Wall"
+        boundary.mechanical_condition = "No-slip"
+    case.numerics.viscosity_model = "Constant"
+    case.numerics.dynamic_viscosity = 1e-3
+    case.numerics.turbulence_model = "Menter k-omega SST"
+    case.numerics.turbulence_omega_formulation = "Regularized k-log-omega"
+    state = InitialState(1.0, 2.0, 0.0, 1.0, turbulence_omega=3.0)
+
+    fields = derive_solution_fields(case, (state,))
+
+    wall_scale = 6.0e-3 / (0.09 * 0.5**2)
+    assert fields["wall_distance"][0] == pytest.approx(0.5)
+    assert fields["log_regularized_omega"][0] == pytest.approx(
+        math.log(state.turbulence_omega / wall_scale)
+    )
+
+
 def test_y_plus_uses_nearest_no_slip_wall_and_molecular_viscosity():
     case = make_periodic_case()
     case.periodic_pairs.clear()
