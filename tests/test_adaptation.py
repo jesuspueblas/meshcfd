@@ -61,6 +61,37 @@ def test_refinement_creates_hanging_node_subfaces_and_preserves_area():
     assert mesh_from_dict(mesh_to_dict(refined)) == refined
 
 
+@pytest.mark.parametrize(
+    ("axis", "varying_coordinate"),
+    (("x", 0), ("y", 1)),
+)
+def test_directional_refinement_splits_along_marked_axis(axis, varying_coordinate):
+    original = two_cell_mesh()
+
+    refined, source_groups = adapt_mesh(original, {0: axis}, set())
+
+    children = [
+        cell
+        for cell, sources in zip(refined.cells, source_groups)
+        if sources == (0,)
+    ]
+    assert len(children) == 2
+    centers = [
+        tuple(
+            sum(refined.points[node][coordinate] for node in cell) / len(cell)
+            for coordinate in range(2)
+        )
+        for cell in children
+    ]
+    other_coordinate = 1 - varying_coordinate
+    assert abs(
+        centers[0][varying_coordinate] - centers[1][varying_coordinate]
+    ) == pytest.approx(0.5)
+    assert centers[0][other_coordinate] == pytest.approx(
+        centers[1][other_coordinate]
+    )
+
+
 def test_refined_siblings_can_be_coarsened_back_to_parent():
     original = two_cell_mesh()
     refined, _ = adapt_mesh(original, {0: "x"}, set())

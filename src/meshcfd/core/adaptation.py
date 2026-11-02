@@ -293,7 +293,7 @@ def _split_polygon(
         )
         if axis in ("x", "y"):
             opposite_pairs = ((0, 2), (1, 3))
-            coordinate = 0 if axis == "x" else 1
+            coordinate = 1 if axis == "x" else 0
             edge_pair = max(
                 opposite_pairs,
                 key=lambda pair: abs(
