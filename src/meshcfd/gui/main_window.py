@@ -60,6 +60,7 @@ class _SolverWorker(QThread):
         live_solution_updates: bool,
         vtk_series_path: Path | None = None,
         vtk_interval: int = 100,
+        cpu_time_offset: float = 0.0,
     ) -> None:
         super().__init__()
         self.case = case
@@ -67,6 +68,7 @@ class _SolverWorker(QThread):
         self.live_solution_updates = live_solution_updates
         self.vtk_series_path = vtk_series_path
         self.vtk_interval = vtk_interval
+        self.cpu_time_offset = cpu_time_offset
         self.result: SolverResult | None = None
         self.error: str | None = None
         self.output_error: str | None = None
@@ -126,6 +128,7 @@ class _SolverWorker(QThread):
                     if solution_callback is not None
                     else {}
                 ),
+                cpu_time_offset=self.cpu_time_offset,
             )
             if series_writer is not None and self.result is not None:
                 if self.output_error is None:
@@ -183,7 +186,10 @@ class MainWindow(QMainWindow):
         self._live_solution_updates = False
         self._vtk_series_path: Path | None = None
         self._vtk_interval = 100
-        self._convergence_history: list[tuple[int, float, tuple[float, ...]]] = []
+        self._convergence_history: list[
+            tuple[int, float, float, tuple[float, ...]]
+        ] = []
+        self._cpu_time_offset = 0.0
         self._history_revision = self._case_revision
         self._dirty = False
         self.setMinimumSize(640, 480)
@@ -599,6 +605,7 @@ class MainWindow(QMainWindow):
     def _set_case(self, case: Case, path: Path | None) -> None:
         self._case_revision += 1
         self._convergence_history.clear()
+        self._cpu_time_offset = 0.0
         self._history_revision = self._case_revision
         self.case = case
         self.current_path = path
@@ -1000,6 +1007,7 @@ class MainWindow(QMainWindow):
             return
         if self._history_revision != self._case_revision:
             self._convergence_history.clear()
+            self._cpu_time_offset = 0.0
             self._history_revision = self._case_revision
             self._update_results_actions()
         snapshot = copy.deepcopy(self.case)
@@ -1015,6 +1023,7 @@ class MainWindow(QMainWindow):
             self._live_solution_updates,
             self._vtk_series_path,
             self._vtk_interval,
+            self._cpu_time_offset,
         )
         self._solver_worker = worker
         worker.progress.connect(self._on_solver_progress)
@@ -1069,23 +1078,25 @@ class MainWindow(QMainWindow):
             self._log_output("Solver resumed.")
 
     def _on_solver_progress(self, progress: SolverProgress) -> None:
-        density, momentum_x, momentum_y, energy = progress.residuals[:4]
-        self._convergence_history.append(
-            (progress.step, progress.time, progress.residuals)
-        )
-        if len(self._convergence_history) > 5000:
-            self._convergence_history = self._convergence_history[::2]
-        worker = self._solver_worker
-        residual_message = (
-            f"{progress.step:10d} {progress.time:12.5e} {progress.time_step:12.5e}"
-            f" {density:12.5e} {momentum_x:12.5e} {momentum_y:12.5e}"
-            f" {energy:12.5e}"
-        )
-        if len(progress.residuals) >= 6:
-            residual_message += (
-                f" {progress.residuals[4]:12.5e} {progress.residuals[5]:12.5e}"
+        if progress.residuals:
+            density, momentum_x, momentum_y, energy = progress.residuals[:4]
+            self._convergence_history.append(
+                (progress.step, progress.time, progress.cpu_time, progress.residuals)
             )
-        self._log_output(residual_message, "ITER")
+            if len(self._convergence_history) > 5000:
+                self._convergence_history = self._convergence_history[::2]
+            residual_message = (
+                f"{progress.step:10d} {progress.time:12.5e} {progress.time_step:12.5e}"
+                f" {density:12.5e} {momentum_x:12.5e} {momentum_y:12.5e}"
+                f" {energy:12.5e}"
+            )
+            if len(progress.residuals) >= 6:
+                residual_message += (
+                    f" {progress.residuals[4]:12.5e}"
+                    f" {progress.residuals[5]:12.5e}"
+                )
+            self._log_output(residual_message, "ITER")
+        worker = self._solver_worker
         if worker is not None and not worker.stop_requested:
             self.status_label.setText(
                 f"Solver running: step {progress.step}, t = {progress.time:.6g}"
@@ -1151,6 +1162,7 @@ class MainWindow(QMainWindow):
             )
             return
         settings_unchanged = self._run_revision == self._case_revision
+        self._cpu_time_offset = result.cpu_time
         if worker.case.mesh != self.case.mesh:
             self.case.mesh = worker.case.mesh
             self.case.mesh_path = None

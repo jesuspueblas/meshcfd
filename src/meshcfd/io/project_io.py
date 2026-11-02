@@ -38,6 +38,10 @@ def case_to_dict(
     if not isinstance(case.numerics.adaptive_mesh, bool):
         raise ValueError("Adaptive mesh setting must be boolean.")
     _positive_integer(case.numerics.adaptation_interval, "Adaptation interval")
+    _positive_integer(
+        case.numerics.convergence_history_interval,
+        "Convergence history interval",
+    )
     maximum_level = _positive_integer(
         case.numerics.adaptation_max_level, "Maximum adaptation level"
     )
@@ -168,6 +172,9 @@ def case_to_dict(
             "max_iterations": case.numerics.max_iterations,
             "end_time": end_time,
             "residual_tolerance": case.numerics.residual_tolerance,
+            "convergence_history_interval": (
+                case.numerics.convergence_history_interval
+            ),
             "gamma": case.numerics.gamma,
             "gas_constant": case.numerics.gas_constant,
             "viscosity_model": case.numerics.viscosity_model,
@@ -346,6 +353,13 @@ def case_from_dict(
                 "residual_tolerance", defaults.residual_tolerance
             ),
             "Residual tolerance",
+        ),
+        convergence_history_interval=_positive_integer(
+            raw_numerics.get(
+                "convergence_history_interval",
+                defaults.convergence_history_interval,
+            ),
+            "Convergence history interval",
         ),
         gamma=_positive_float(raw_numerics.get("gamma", defaults.gamma), "Gamma"),
         gas_constant=_positive_float(

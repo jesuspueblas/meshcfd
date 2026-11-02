@@ -84,6 +84,15 @@ class NumericsPanel(QWidget):
             "Residual is reported for monitoring; transient runs stop at End time "
             "or Maximum time steps."
         )
+        self.convergence_history_interval_spin = QSpinBox(self)
+        self.convergence_history_interval_spin.setRange(1, 10000000)
+        self.convergence_history_interval_spin.setToolTip(
+            "Calculate and record convergence residual norms every N solver steps."
+        )
+        form.addRow(
+            "History interval:",
+            self.convergence_history_interval_spin,
+        )
         self.gamma_spin = self._double_spin(1.0001, 2.0, 1.4, 4)
         self.gas_constant_spin = self._double_spin(1e-6, 1e9, 287.05, 4)
         self.viscosity_model_combo = self._combo(
@@ -222,6 +231,7 @@ class NumericsPanel(QWidget):
             self.iterations_spin,
             self.end_time_spin,
             self.residual_spin,
+            self.convergence_history_interval_spin,
             self.gamma_spin,
             self.gas_constant_spin,
             self.viscosity_model_combo,
@@ -260,6 +270,7 @@ class NumericsPanel(QWidget):
             self.iterations_spin,
             self.end_time_spin,
             self.residual_spin,
+            self.convergence_history_interval_spin,
             self.gamma_spin,
             self.gas_constant_spin,
             self.dynamic_viscosity_spin,
@@ -346,6 +357,9 @@ class NumericsPanel(QWidget):
         self.iterations_spin.setValue(settings.max_iterations)
         self.end_time_spin.setValue(settings.end_time)
         self.residual_spin.setValue(settings.residual_tolerance)
+        self.convergence_history_interval_spin.setValue(
+            settings.convergence_history_interval
+        )
         self.gamma_spin.setValue(settings.gamma)
         self.gas_constant_spin.setValue(settings.gas_constant)
         self.viscosity_model_combo.setCurrentText(settings.viscosity_model)
@@ -401,6 +415,9 @@ class NumericsPanel(QWidget):
         settings.max_iterations = self.iterations_spin.value()
         settings.end_time = self.end_time_spin.value()
         settings.residual_tolerance = self.residual_spin.value()
+        settings.convergence_history_interval = (
+            self.convergence_history_interval_spin.value()
+        )
         settings.gamma = self.gamma_spin.value()
         settings.gas_constant = self.gas_constant_spin.value()
         settings.viscosity_model = self.viscosity_model_combo.currentText()

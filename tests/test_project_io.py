@@ -386,6 +386,7 @@ def test_adaptive_mesh_settings_and_hierarchy_round_trip(tmp_path):
     assert restored.mesh == case.mesh
     assert restored.numerics.adaptive_mesh
     assert restored.numerics.adaptation_interval == 7
+    assert restored.numerics.convergence_history_interval == 10
     assert restored.numerics.adaptation_max_level == 4
     assert restored.numerics.adaptation_refine_threshold == pytest.approx(0.15)
     assert restored.numerics.adaptation_variable == "Pressure"
@@ -430,11 +431,16 @@ def test_version_four_periodic_case_defaults_end_time():
     data = case_to_dict(case)
     data["version"] = 4
     data["numerics"].pop("end_time")
+    data["numerics"].pop("convergence_history_interval")
 
     restored = case_from_dict(data)
 
     assert restored.periodic_pairs == case.periodic_pairs
     assert restored.numerics.end_time == NumericalSettings().end_time
+    assert (
+        restored.numerics.convergence_history_interval
+        == NumericalSettings().convergence_history_interval
+    )
 
 
 def test_periodic_pair_detection_rejects_nonmatching_patches():

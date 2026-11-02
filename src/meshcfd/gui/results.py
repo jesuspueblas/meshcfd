@@ -346,7 +346,7 @@ class ConvergenceHistoryWidget(QWidget):
     def __init__(
         self,
         history_provider: Callable[
-            [], Sequence[tuple[int, float, tuple[float, ...]]]
+            [], Sequence[tuple[int, float, float, tuple[float, ...]]]
         ],
         parent: QWidget | None = None,
     ) -> None:
@@ -360,6 +360,11 @@ class ConvergenceHistoryWidget(QWidget):
         self.scale_combo.setCurrentText("Logarithmic")
         self.scale_combo.currentTextChanged.connect(self.refresh_plot)
         controls.addWidget(self.scale_combo)
+        controls.addWidget(QLabel("X axis"))
+        self.x_axis_combo = QComboBox(self)
+        self.x_axis_combo.addItems(("Iteration", "Physical time", "CPU time"))
+        self.x_axis_combo.currentTextChanged.connect(self.refresh_plot)
+        controls.addWidget(self.x_axis_combo)
         self.reset_zoom_button = QPushButton(
             self.style().standardIcon(QStyle.SP_BrowserReload), "Reset zoom", self
         )
@@ -424,23 +429,29 @@ class ConvergenceHistoryWidget(QWidget):
 
     def refresh_plot(self) -> None:
         history = self._history_provider()
+        x_axis = self.x_axis_combo.currentText()
+        x_index, x_label = {
+            "Iteration": (0, "Iteration"),
+            "Physical time": (1, "Physical time (s)"),
+            "CPU time": (2, "CPU time (s)"),
+        }[x_axis]
         selected = [
             (index, label)
             for label, index in self._variable_indices.items()
             if self.variable_items[label].checkState(0) == Qt.Checked
             and (index < 4 or self._turbulence_enabled)
-            and any(index < len(entry[2]) for entry in history)
+            and any(index < len(entry[3]) for entry in history)
         ]
         self.plot.set_data(
-            [entry[0] for entry in history],
+            [entry[x_index] for entry in history],
             {
                 name: [
-                    entry[2][index] if index < len(entry[2]) else math.nan
+                    entry[3][index] if index < len(entry[3]) else math.nan
                     for entry in history
                 ]
                 for index, name in selected
             },
-            "Iteration",
+            x_label,
             "Residual",
             logarithmic_y=self.scale_combo.currentText() == "Logarithmic",
         )

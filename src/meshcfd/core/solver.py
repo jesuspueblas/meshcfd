@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, replace
+from time import thread_time
 from typing import Callable
 
 import numpy as np
@@ -48,6 +49,7 @@ class SolverProgress:
     residuals: tuple[float, ...]
     states: tuple[InitialState, ...] | None = None
     mesh: FiniteVolumeMesh | None = None
+    cpu_time: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -57,6 +59,7 @@ class SolverResult:
     steps: int
     residual: float
     completed: bool
+    cpu_time: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -156,8 +159,10 @@ def solve_case(
     pause_callback: Callable[[], None] | None = None,
     solution_callback: Callable[[int, float, tuple[InitialState, ...]], None] | None = None,
     solution_interval: int = 1,
+    cpu_time_offset: float = 0.0,
 ) -> SolverResult:
     """Advance a case from its current time to its end time or iteration limit."""
+    cpu_start = thread_time()
     if case.mesh is None:
         raise SolverError("Import a mesh before running the solver.")
     settings = case.numerics
@@ -231,6 +236,14 @@ def solve_case(
         or solution_interval <= 0
     ):
         raise SolverError("Solution output interval must be a positive integer.")
+    if (
+        isinstance(settings.convergence_history_interval, bool)
+        or not isinstance(settings.convergence_history_interval, int)
+        or settings.convergence_history_interval <= 0
+    ):
+        raise SolverError("Convergence history interval must be a positive integer.")
+    if not math.isfinite(cpu_time_offset) or cpu_time_offset < 0.0:
+        raise SolverError("CPU time offset must be finite and non-negative.")
     if not isinstance(settings.adaptive_mesh, bool):
         raise SolverError("Adaptive mesh setting must be boolean.")
     if (
@@ -373,7 +386,6 @@ def solve_case(
         raise SolverError(f"Invalid initial state: {error}") from error
 
     time = start_time
-    residual = 0.0
     completed = False
     steps = step_offset
     for local_step in range(1, settings.max_iterations + 1):
@@ -399,7 +411,7 @@ def solve_case(
             derivative = _residual(
                 start, geometry, settings, start_turbulence
             )
-            turbulence_component_residuals: tuple[float, ...] = ()
+            turbulence_derivative = None
             omega_variable_derivative = None
             if start_turbulence is not None:
                 turbulence_derivative = _sst_residual(
@@ -407,12 +419,6 @@ def solve_case(
                     start_turbulence / primitive[:, :1],
                     geometry,
                     settings,
-                )
-                turbulence_component_residuals = tuple(
-                    float(value)
-                    for value in np.sqrt(
-                        np.mean(turbulence_derivative**2, axis=0)
-                    )
                 )
                 if regularized_omega is not None:
                     omega_variable_derivative = _sst_regularized_rate(
@@ -714,7 +720,6 @@ def solve_case(
             raise SolverError(f"Solver failed at step {step}: {error}") from error
         time += time_step
         steps = step
-        residual = float(np.sqrt(np.mean(derivative**2)))
         adapted_mesh = None
         if settings.adaptive_mesh and step % settings.adaptation_interval == 0:
             current_primitive = _primitive_from_conservative(
@@ -770,6 +775,21 @@ def solve_case(
                         adapted_mesh = mesh
             except (ValueError, FloatingPointError, np.linalg.LinAlgError) as error:
                 raise SolverError(f"Adaptive mesh update failed at step {step}: {error}") from error
+        final_step = (
+            time >= settings.end_time * (1.0 - 1e-13)
+            or local_step == settings.max_iterations
+            or (
+                cancel_callback is not None and cancel_callback()
+            )
+        )
+        report_residual = (
+            progress_callback is not None
+            and (
+                step % settings.convergence_history_interval == 0
+                or adapted_mesh is not None
+                or final_step
+            )
+        )
         if progress_callback is not None:
             progress_states = None
             if (
@@ -787,20 +807,31 @@ def solve_case(
                 progress_states = _states_from_solution(
                     progress_primitive, turbulence_conservative
                 )
-            component_residuals = tuple(
-                float(value)
-                for value in np.sqrt(np.mean(derivative**2, axis=0))
-            ) + turbulence_component_residuals
-            progress_callback(
-                SolverProgress(
-                    step,
-                    time,
-                    time_step,
-                    component_residuals,
-                    progress_states,
-                    adapted_mesh,
+            if report_residual or progress_states is not None:
+                component_residuals = ()
+                if report_residual:
+                    component_residuals = tuple(
+                        float(value)
+                        for value in np.sqrt(np.mean(derivative**2, axis=0))
+                    )
+                    if turbulence_derivative is not None:
+                        component_residuals += tuple(
+                            float(value)
+                            for value in np.sqrt(
+                                np.mean(turbulence_derivative**2, axis=0)
+                            )
+                        )
+                progress_callback(
+                    SolverProgress(
+                        step,
+                        time,
+                        time_step,
+                        component_residuals,
+                        progress_states,
+                        adapted_mesh,
+                        cpu_time_offset + thread_time() - cpu_start,
+                    )
                 )
-            )
         if solution_callback is not None and step % solution_interval == 0:
             snapshot_states = progress_states if progress_callback is not None else None
             if snapshot_states is None:
@@ -827,7 +858,14 @@ def solve_case(
         raise SolverError(f"Could not evaluate final residual: {error}") from error
     residual = float(np.sqrt(np.mean(final_residual**2)))
     states = _states_from_solution(final_primitive, turbulence_conservative)
-    return SolverResult(states, time, steps, residual, completed)
+    return SolverResult(
+        states,
+        time,
+        steps,
+        residual,
+        completed,
+        cpu_time_offset + thread_time() - cpu_start,
+    )
 
 
 def _pack_time_state(

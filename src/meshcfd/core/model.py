@@ -92,6 +92,7 @@ class NumericalSettings:
     max_iterations: int = 1000
     end_time: float = 1.0
     residual_tolerance: float = 1e-6
+    convergence_history_interval: int = 10
     gamma: float = 1.4
     gas_constant: float = 287.05
     viscosity_model: str = "Inviscid"

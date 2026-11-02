@@ -154,6 +154,17 @@ def test_adaptive_mesh_controls_update_numerical_settings(qtbot):
     assert window.case.numerics.adaptation_variable == "Pressure"
 
 
+def test_convergence_history_interval_control_updates_settings(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    panel = window.numerics_panel
+    assert panel.convergence_history_interval_spin.value() == 10
+    panel.convergence_history_interval_spin.setValue(25)
+
+    assert window.case.numerics.convergence_history_interval == 25
+
+
 def test_result_actions_export_vtu_and_configure_series(qtbot, monkeypatch, tmp_path):
     window = MainWindow()
     qtbot.addWidget(window)
@@ -194,11 +205,12 @@ def test_result_actions_export_vtu_and_configure_series(qtbot, monkeypatch, tmp_
 
 
 def test_result_widgets_prepare_convergence_and_cut_plot_data(qtbot):
-    history = [(1, 0.1, (0.4, 0.3, 0.2, 0.1, 0.05, 0.01))]
+    history = [(1, 0.1, 0.025, (0.4, 0.3, 0.2, 0.1, 0.05, 0.01))]
     convergence = ConvergenceHistoryWidget(lambda: history)
     qtbot.addWidget(convergence)
     assert convergence.plot.logarithmic_y
     assert convergence.plot.x_values == (1.0,)
+    assert convergence.plot.canvas.x_label == "Iteration"
     assert convergence.plot.series["Energy"] == (0.1,)
     assert convergence._turbulence_group.isHidden()
     assert "Turbulent k" not in convergence.plot.series
@@ -214,8 +226,14 @@ def test_result_widgets_prepare_convergence_and_cut_plot_data(qtbot):
     assert not convergence.plot.logarithmic_y
     convergence.scale_combo.setCurrentText("Logarithmic")
     assert convergence.plot.logarithmic_y
+    convergence.x_axis_combo.setCurrentText("Physical time")
+    assert convergence.plot.x_values == (0.1,)
+    assert convergence.plot.canvas.x_label == "Physical time (s)"
+    convergence.x_axis_combo.setCurrentText("CPU time")
+    assert convergence.plot.x_values == (0.025,)
+    assert convergence.plot.canvas.x_label == "CPU time (s)"
 
-    history[:] = [(2, 0.2, (0.4, 0.3, 0.2, 0.1))]
+    history[:] = [(2, 0.2, 0.05, (0.4, 0.3, 0.2, 0.1))]
     convergence.refresh_plot()
     assert "Turbulent k" not in convergence.plot.series
 
@@ -450,6 +468,7 @@ def test_run_pauses_and_stop_preserves_state_for_updated_settings(qtbot, monkeyp
         start_time,
         step_offset,
         pause_callback,
+        **_kwargs,
     ):
         calls.append((run_case, tuple(initial_states), start_time, step_offset))
         if len(calls) == 1:

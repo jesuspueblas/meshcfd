@@ -1113,6 +1113,30 @@ def test_solver_emits_solution_snapshots_at_configured_global_steps():
     assert all(len(snapshot[2]) == len(case.mesh.cells) for snapshot in snapshots)
 
 
+def test_solver_samples_convergence_history_at_configured_interval():
+    case = make_periodic_case()
+    case.numerics.end_time = 10.0
+    case.numerics.max_iterations = 5
+    case.numerics.convergence_history_interval = 2
+    progress = []
+
+    result = solve_case(
+        case,
+        (InitialState(1.0, 0.1, 0.0, 1.0),),
+        progress.append,
+        cpu_time_offset=3.0,
+    )
+
+    assert [item.step for item in progress] == [2, 4, 5]
+    assert [item.time for item in progress] == sorted(item.time for item in progress)
+    assert all(item.residuals for item in progress)
+    assert all(item.cpu_time >= 3.0 for item in progress)
+    assert [item.cpu_time for item in progress] == sorted(
+        item.cpu_time for item in progress
+    )
+    assert result.cpu_time >= progress[-1].cpu_time
+
+
 def test_solution_cut_samples_cell_values_in_line_order():
     case = make_periodic_case(nx=2, length_x=2.0)
     states = (
