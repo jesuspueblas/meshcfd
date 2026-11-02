@@ -15,6 +15,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QPushButton,
     QSizePolicy,
+    QStyle,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -40,10 +41,10 @@ class _PlotCanvas(QWidget):
         self.logarithmic_y = False
         self._view_bounds: tuple[float, float, float, float] | None = None
         self._full_bounds = (0.0, 1.0, 0.0, 1.0)
-        self.interaction_mode = "Pan"
         self._drag_start: QPoint | None = None
         self._drag_last: QPoint | None = None
         self._drag_position: QPoint | None = None
+        self._drag_mode: str | None = None
         self.setMouseTracking(True)
 
     def set_data(
@@ -101,12 +102,6 @@ class _PlotCanvas(QWidget):
         self._view_bounds = self._full_bounds
         self.update()
 
-    def set_interaction_mode(self, mode: str) -> None:
-        if mode not in ("Pan", "Zoom"):
-            raise ValueError(f"Unsupported plot interaction mode: {mode}")
-        self.interaction_mode = mode
-        self.setCursor(Qt.OpenHandCursor if mode == "Pan" else Qt.CrossCursor)
-
     def _plot_rect(self) -> QRectF:
         return QRectF(78, 22, max(1, self.width() - 102), max(1, self.height() - 84))
 
@@ -140,12 +135,18 @@ class _PlotCanvas(QWidget):
         event.accept()
 
     def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.LeftButton and self._plot_rect().contains(event.pos()):
+        if (
+            event.button() in (Qt.LeftButton, Qt.MiddleButton)
+            and self._plot_rect().contains(event.pos())
+        ):
             self._drag_start = event.pos()
             self._drag_last = event.pos()
             self._drag_position = event.pos()
-            if self.interaction_mode == "Pan":
+            self._drag_mode = "Zoom" if event.button() == Qt.LeftButton else "Pan"
+            if self._drag_mode == "Pan":
                 self.setCursor(Qt.ClosedHandCursor)
+            else:
+                self.setCursor(Qt.CrossCursor)
             self.update()
             event.accept()
             return
@@ -156,7 +157,7 @@ class _PlotCanvas(QWidget):
             super().mouseMoveEvent(event)
             return
         self._drag_position = event.pos()
-        if self.interaction_mode == "Pan" and self._drag_last is not None:
+        if self._drag_mode == "Pan" and self._drag_last is not None:
             rect = self._plot_rect()
             x_min, x_max, y_min, y_max = self._active_bounds()
             delta_x = (event.x() - self._drag_last.x()) / rect.width() * (x_max - x_min)
@@ -172,8 +173,11 @@ class _PlotCanvas(QWidget):
         event.accept()
 
     def mouseReleaseEvent(self, event) -> None:
-        if event.button() == Qt.LeftButton and self._drag_start is not None:
-            if self.interaction_mode == "Zoom":
+        if self._drag_start is not None and (
+            (self._drag_mode == "Zoom" and event.button() == Qt.LeftButton)
+            or (self._drag_mode == "Pan" and event.button() == Qt.MiddleButton)
+        ):
+            if self._drag_mode == "Zoom":
                 selection = QRectF(QPointF(self._drag_start), QPointF(event.pos())).normalized()
                 rect = self._plot_rect()
                 selection = selection.intersected(rect)
@@ -193,7 +197,8 @@ class _PlotCanvas(QWidget):
             self._drag_start = None
             self._drag_last = None
             self._drag_position = None
-            self.setCursor(Qt.OpenHandCursor if self.interaction_mode == "Pan" else Qt.CrossCursor)
+            self._drag_mode = None
+            self.setCursor(Qt.ArrowCursor)
             self.update()
             event.accept()
             return
@@ -288,7 +293,7 @@ class _PlotCanvas(QWidget):
             QRectF(-plot.height() / 2, -10, plot.height(), 20), Qt.AlignCenter, self.y_label
         )
         painter.restore()
-        if self._drag_start is not None and self.interaction_mode == "Zoom":
+        if self._drag_start is not None and self._drag_mode == "Zoom":
             painter.save()
             painter.setClipRect(plot, Qt.IntersectClip)
             painter.setPen(QPen(QColor("#2563EB"), 1.0, Qt.DashLine))
@@ -308,23 +313,8 @@ class LinePlotWidget(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(2, 2, 2, 2)
-        controls = QHBoxLayout()
-        self.pan_button = QPushButton("Pan", self)
-        self.pan_button.setCheckable(True)
-        self.zoom_button = QPushButton("Zoom", self)
-        self.zoom_button.setCheckable(True)
-        self.reset_zoom_button = QPushButton("Reset zoom", self)
-        self.pan_button.clicked.connect(lambda: self.set_interaction_mode("Pan"))
-        self.zoom_button.clicked.connect(lambda: self.set_interaction_mode("Zoom"))
-        self.reset_zoom_button.clicked.connect(self.reset_zoom)
-        controls.addWidget(self.pan_button)
-        controls.addWidget(self.zoom_button)
-        controls.addWidget(self.reset_zoom_button)
-        controls.addStretch(1)
-        layout.addLayout(controls)
         self.canvas = _PlotCanvas(self)
         layout.addWidget(self.canvas, 1)
-        self.set_interaction_mode("Pan")
 
     @property
     def x_values(self) -> tuple[float, ...]:
@@ -348,11 +338,6 @@ class LinePlotWidget(QWidget):
     ) -> None:
         self.canvas.set_data(x_values, series, x_label, y_label, logarithmic_y)
 
-    def set_interaction_mode(self, mode: str) -> None:
-        self.pan_button.setChecked(mode == "Pan")
-        self.zoom_button.setChecked(mode == "Zoom")
-        self.canvas.set_interaction_mode(mode)
-
     def reset_zoom(self) -> None:
         self.canvas.reset_zoom()
 
@@ -375,6 +360,11 @@ class ConvergenceHistoryWidget(QWidget):
         self.scale_combo.setCurrentText("Logarithmic")
         self.scale_combo.currentTextChanged.connect(self.refresh_plot)
         controls.addWidget(self.scale_combo)
+        self.reset_zoom_button = QPushButton(
+            self.style().standardIcon(QStyle.SP_BrowserReload), "Reset zoom", self
+        )
+        self.reset_zoom_button.clicked.connect(lambda: self.plot.reset_zoom())
+        controls.addWidget(self.reset_zoom_button)
         controls.addStretch(1)
         layout.addLayout(controls)
         self.variable_tree = QTreeWidget(self)
@@ -475,17 +465,21 @@ class CutProfileWidget(QWidget):
         self.field_combo.addItems(SOLUTION_VARIABLES)
         if selected_field in SOLUTION_VARIABLES:
             self.field_combo.setCurrentText(selected_field)
+        field_controls = QHBoxLayout()
+        field_controls.addWidget(self.field_combo)
+        self.reset_zoom_button = QPushButton(
+            self.style().standardIcon(QStyle.SP_BrowserReload), "Reset zoom", self
+        )
+        self.reset_zoom_button.clicked.connect(lambda: self.plot.reset_zoom())
+        field_controls.addWidget(self.reset_zoom_button)
         self.angle_spin = self._coordinate_spin()
         self.x_spin = self._coordinate_spin()
         self.y_spin = self._coordinate_spin()
-        form.addRow("Field", self.field_combo)
+        form.addRow("Field", field_controls)
         form.addRow("Angle (degrees)", self.angle_spin)
         form.addRow("Point X", self.x_spin)
         form.addRow("Point Y", self.y_spin)
         controls.addLayout(form)
-        self.plot_button = QPushButton("Plot cut", self)
-        self.plot_button.clicked.connect(self.plot_cut)
-        controls.addWidget(self.plot_button, 0, Qt.AlignBottom)
         controls.addStretch(1)
         layout.addLayout(controls)
         self.status_label = QLabel("Load a solution to plot a cut.")

@@ -392,10 +392,43 @@ class MainWindow(QMainWindow):
         self.action_disable_vtk_series.triggered.connect(
             self._on_disable_vtk_series
         )
+        self.action_clear_output = QAction("Clear Output", self)
+        self.action_clear_output.triggered.connect(self.output_terminal.clear)
+        self.action_exit = QAction("Exit", self)
+        self.action_exit.triggered.connect(self.close)
         self.action_convergence_history = (
             self.convergence_history_dock.toggleViewAction()
         )
         self.action_solution_cut = self.cut_profile_dock.toggleViewAction()
+        self.action_boundary_dock = self.boundary_dock.toggleViewAction()
+        self.action_numerics_dock = self.numerics_dock.toggleViewAction()
+        self.action_initial_conditions_dock = (
+            self.initial_conditions_dock.toggleViewAction()
+        )
+        self.action_output_dock = self.output_dock.toggleViewAction()
+
+        for action, icon in (
+            (self.action_new, QStyle.SP_FileIcon),
+            (self.action_open, QStyle.SP_DialogOpenButton),
+            (self.action_save, QStyle.SP_DialogSaveButton),
+            (self.action_save_as, QStyle.SP_DialogSaveButton),
+            (self.action_import_mesh, QStyle.SP_DirOpenIcon),
+            (self.action_fit_mesh, QStyle.SP_DesktopIcon),
+            (self.action_run, QStyle.SP_MediaPlay),
+            (self.action_stop, QStyle.SP_MediaStop),
+            (self.action_export_vtu, QStyle.SP_ArrowDown),
+            (self.action_configure_vtk_series, QStyle.SP_FileDialogDetailedView),
+            (self.action_disable_vtk_series, QStyle.SP_DialogCancelButton),
+            (self.action_clear_output, QStyle.SP_TrashIcon),
+            (self.action_exit, QStyle.SP_DialogCloseButton),
+            (self.action_boundary_dock, QStyle.SP_DirIcon),
+            (self.action_numerics_dock, QStyle.SP_ComputerIcon),
+            (self.action_initial_conditions_dock, QStyle.SP_FileDialogInfoView),
+            (self.action_output_dock, QStyle.SP_MessageBoxInformation),
+            (self.action_convergence_history, QStyle.SP_ComputerIcon),
+            (self.action_solution_cut, QStyle.SP_ArrowForward),
+        ):
+            action.setIcon(self.style().standardIcon(icon))
 
     def _create_menus(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
@@ -404,9 +437,7 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(self.action_import_mesh)
         file_menu.addSeparator()
-        action_exit = QAction("Exit", self)
-        action_exit.triggered.connect(self.close)
-        file_menu.addAction(action_exit)
+        file_menu.addAction(self.action_exit)
 
         simulation_menu = self.menuBar().addMenu("&Simulation")
         simulation_menu.addAction(self.action_run)
@@ -424,15 +455,22 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.action_grid)
         view_menu.addSeparator()
         view_menu.addAction(self.action_fit_mesh)
-        view_menu.addAction(self.boundary_dock.toggleViewAction())
-        view_menu.addAction(self.numerics_dock.toggleViewAction())
-        view_menu.addAction(self.initial_conditions_dock.toggleViewAction())
-        view_menu.addAction(self.visualization_toolbar.toggleViewAction())
-        view_menu.addAction(self.output_dock.toggleViewAction())
+        view_menu.addAction(self.action_boundary_dock)
+        view_menu.addAction(self.action_numerics_dock)
+        view_menu.addAction(self.action_initial_conditions_dock)
+        view_menu.addAction(self.action_output_dock)
         view_menu.addAction(self.action_convergence_history)
         view_menu.addAction(self.action_solution_cut)
-        self.action_clear_output = QAction("Clear Output", self)
-        self.action_clear_output.triggered.connect(self.output_terminal.clear)
+        view_menu.addSeparator()
+        for toolbar in (
+            self.case_toolbar,
+            self.view_toolbar,
+            self.visualization_toolbar,
+        ):
+            toggle_action = toolbar.toggleViewAction()
+            toggle_action.setIcon(self.style().standardIcon(QStyle.SP_TitleBarShadeButton))
+            view_menu.addAction(toggle_action)
+        view_menu.addSeparator()
         view_menu.addAction(self.action_clear_output)
 
     def _create_toolbar(self) -> None:
@@ -451,31 +489,62 @@ class MainWindow(QMainWindow):
         )
         self.addToolBar(Qt.TopToolBarArea, toolbar)
         self.case_toolbar = toolbar
-        for action, icon in (
-            (self.action_new, QStyle.SP_FileIcon),
-            (self.action_open, QStyle.SP_DialogOpenButton),
-            (self.action_save, QStyle.SP_DialogSaveButton),
-            (self.action_import_mesh, QStyle.SP_DirOpenIcon),
-            (self.action_fit_mesh, QStyle.SP_DesktopIcon),
+        for action in (
+            self.action_new,
+            self.action_open,
+            self.action_save,
+            self.action_import_mesh,
         ):
-            action.setIcon(self.style().standardIcon(icon))
             action.setToolTip(action.text())
             action.setStatusTip(action.text())
             toolbar.addAction(action)
-        self.action_grid.setIcon(self._create_grid_icon(icon_size))
-        self.action_grid.setToolTip(self.action_grid.text())
-        self.action_grid.setStatusTip(self.action_grid.text())
-        toolbar.addAction(self.action_grid)
-        self.action_run.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
         self.action_run.setToolTip(self.action_run.text())
         self.action_run.setStatusTip(self.action_run.text())
         toolbar.addAction(self.action_run)
-        self.action_stop.setIcon(self.style().standardIcon(QStyle.SP_MediaStop))
         self.action_stop.setToolTip(self.action_stop.text())
         self.action_stop.setStatusTip(self.action_stop.text())
         toolbar.addAction(self.action_stop)
         toolbar.addSeparator()
 
+        self.view_toolbar = QToolBar("View", self)
+        self.view_toolbar.setObjectName("view_toolbar")
+        self.view_toolbar.setMovable(True)
+        self.view_toolbar.setFloatable(False)
+        self.view_toolbar.setIconSize(QSize(icon_size, icon_size))
+        self.view_toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.view_toolbar.setStyleSheet(toolbar.styleSheet())
+        self.addToolBar(Qt.TopToolBarArea, self.view_toolbar)
+        self.action_grid.setIcon(self._create_grid_icon(icon_size))
+        self.action_grid.setToolTip(self.action_grid.text())
+        self.action_grid.setStatusTip(self.action_grid.text())
+        for action in (self.action_grid, self.action_fit_mesh):
+            self.view_toolbar.addAction(action)
+        self.view_toolbar.addSeparator()
+        for action in (
+            self.action_boundary_dock,
+            self.action_numerics_dock,
+            self.action_initial_conditions_dock,
+            self.action_output_dock,
+            self.action_convergence_history,
+            self.action_solution_cut,
+        ):
+            self.view_toolbar.addAction(action)
+        self.view_toolbar.addSeparator()
+        self.view_toolbar.addAction(self.action_clear_output)
+
+        for action in (
+            self.action_boundary_dock,
+            self.action_numerics_dock,
+            self.action_initial_conditions_dock,
+            self.action_output_dock,
+            self.action_convergence_history,
+            self.action_solution_cut,
+            self.action_clear_output,
+        ):
+            action.setToolTip(action.text())
+            action.setStatusTip(action.text())
+
+        self.addToolBarBreak(Qt.TopToolBarArea)
         self.visualization_toolbar = QToolBar("Solution View", self)
         self.visualization_toolbar.setObjectName("solution_view_toolbar")
         self.visualization_toolbar.setMovable(True)
@@ -484,7 +553,6 @@ class MainWindow(QMainWindow):
             "QToolBar { spacing: 4px; padding: 2px; background: #F8FAFC; "
             "border-bottom: 1px solid #CBD5E1; }"
         )
-        self.addToolBarBreak(Qt.TopToolBarArea)
         self.addToolBar(Qt.TopToolBarArea, self.visualization_toolbar)
         self.visualization_scroll = QScrollArea(self)
         self.visualization_scroll.setFrameShape(QFrame.NoFrame)

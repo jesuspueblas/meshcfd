@@ -50,7 +50,9 @@ Field expressions support arithmetic, comparisons, and common trigonometric,
 hyperbolic, exponential, logarithmic, and root functions. Blocks are applied in
 order, with later matching blocks taking precedence; cells outside all blocks
 use the configurable base state.
-The View menu and toolbar toggle the labeled background grid. Boundary
+The View toolbar toggles the labeled background grid and provides shortcuts
+for the main panels. The View menu can show or hide the Case, View, and
+Solution View toolbars, as well as the application panels. Boundary
 Conditions and Initial Conditions are initially stacked on the left,
 Numerical Setup is on the right, and Solution View is available in its own
 top toolbar. The Solution View toolbar controls the displayed field,
@@ -147,8 +149,10 @@ logarithmic residual scales and lets you select which residuals to monitor.
 Residuals are organized in a tree, with the turbulence group available only
 when the SST model is selected. Curves are clipped to the plot axes, and the
 color-bar overlay stays fixed in its chosen viewport position while panning.
-Both graph panels provide rectangular zoom, drag-to-pan, mouse-wheel zoom, and
-Reset zoom controls. Convergence History and Solution Cut are movable,
+Both graph panels zoom by dragging with the left mouse button or using the
+mouse wheel, and pan by dragging with the middle mouse button. Each panel has
+a Reset zoom button; Solution Cut updates automatically when its field or cut
+parameters change. Convergence History and Solution Cut are movable,
 floatable dock panels whose positions can be arranged alongside the other
 application panels. While the Solution Cut panel is visible, its reference
 point and angle are shown as a highlighted line over the mesh and update as

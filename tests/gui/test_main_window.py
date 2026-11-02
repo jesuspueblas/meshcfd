@@ -157,6 +157,11 @@ def test_result_widgets_prepare_convergence_and_cut_plot_data(qtbot):
     cut.set_solution(case, (InitialState(density=1.5),), "Density")
     assert cut.plot.x_values == (0.0,)
     assert cut.plot.series["Density"] == (1.5,)
+    assert not hasattr(cut, "plot_button")
+    assert not hasattr(cut.plot, "pan_button")
+    assert not hasattr(cut.plot, "zoom_button")
+    assert not cut.reset_zoom_button.icon().isNull()
+    assert not convergence.reset_zoom_button.icon().isNull()
 
 
 def test_plot_zoom_pan_and_reset_controls(qtbot):
@@ -169,7 +174,6 @@ def test_plot_zoom_pan_and_reset_controls(qtbot):
     canvas = plot.canvas
     initial_bounds = canvas._view_bounds
 
-    plot.zoom_button.click()
     start = QPointF(110.0, 60.0)
     end = QPointF(300.0, 220.0)
     QApplication.sendEvent(
@@ -195,14 +199,13 @@ def test_plot_zoom_pan_and_reset_controls(qtbot):
     zoomed_bounds = canvas._view_bounds
     assert zoomed_bounds != initial_bounds
 
-    plot.pan_button.click()
     QApplication.sendEvent(
         canvas,
         QMouseEvent(
             QEvent.MouseButtonPress,
             QPointF(200.0, 140.0),
-            Qt.LeftButton,
-            Qt.LeftButton,
+            Qt.MiddleButton,
+            Qt.MiddleButton,
             Qt.NoModifier,
         ),
     )
@@ -212,7 +215,7 @@ def test_plot_zoom_pan_and_reset_controls(qtbot):
             QEvent.MouseMove,
             QPointF(240.0, 160.0),
             Qt.NoButton,
-            Qt.LeftButton,
+            Qt.MiddleButton,
             Qt.NoModifier,
         ),
     )
@@ -221,14 +224,53 @@ def test_plot_zoom_pan_and_reset_controls(qtbot):
         QMouseEvent(
             QEvent.MouseButtonRelease,
             QPointF(240.0, 160.0),
-            Qt.LeftButton,
+            Qt.MiddleButton,
             Qt.NoButton,
             Qt.NoModifier,
         ),
     )
     assert canvas._view_bounds != zoomed_bounds
-    plot.reset_zoom_button.click()
+    plot.reset_zoom()
     assert canvas._view_bounds == initial_bounds
+
+
+def test_view_toolbar_and_all_toolbar_visibility_actions(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitExposed(window)
+
+    assert window.view_toolbar.objectName() == "view_toolbar"
+    assert window.toolBarArea(window.case_toolbar) == Qt.TopToolBarArea
+    assert window.toolBarArea(window.view_toolbar) == Qt.TopToolBarArea
+    assert window.toolBarArea(window.visualization_toolbar) == Qt.TopToolBarArea
+
+    view_menu = next(
+        action.menu()
+        for action in window.menuBar().actions()
+        if action.text() == "&View"
+    )
+    menu_actions = {action.text(): action for action in view_menu.actions()}
+    assert {"Case", "View", "Solution View"} <= menu_actions.keys()
+    assert all(
+        not action.icon().isNull()
+        for action in (
+            window.action_new,
+            window.action_open,
+            window.action_save,
+            window.action_import_mesh,
+            window.action_run,
+            window.action_stop,
+            window.action_fit_mesh,
+            window.action_grid,
+            window.action_clear_output,
+        )
+    )
+
+    menu_actions["View"].trigger()
+    assert window.view_toolbar.isHidden()
+    menu_actions["View"].trigger()
+    assert not window.view_toolbar.isHidden()
 
 
 def test_plot_series_are_clipped_to_axes(qtbot):
