@@ -836,9 +836,12 @@ def test_run_action_runs_solver_and_displays_solution(qtbot, tmp_path):
     assert restored.final_solution == window.case.final_solution
     assert restored.solution_time == window.case.solution_time
     assert restored.solution_steps == window.case.solution_steps
+    assert restored.convergence_history == window.case.convergence_history
+    assert restored.solution_cpu_time == window.case.solution_cpu_time
 
     window._set_case(restored, case_path)
     assert window.canvas.solution == restored.final_solution
+    assert window._convergence_history == restored.convergence_history
 
 
 def test_running_again_continues_from_current_solution(qtbot, tmp_path):
@@ -854,17 +857,28 @@ def test_running_again_continues_from_current_solution(qtbot, tmp_path):
     qtbot.waitUntil(lambda: window._solver_worker is None, timeout=5000)
     first_solution = window.case.final_solution
     first_time = window.case.solution_time
+    first_history = list(window.case.convergence_history)
+    first_cpu_time = window.case.solution_cpu_time
     assert first_solution is not None
     assert window.case.solution_steps == 1
+    assert first_history
+    assert first_cpu_time >= 0.0
 
     case_path = tmp_path / "restart.mcf.json"
     save_case(case_path, window.case)
     restored = load_case(case_path)
     window._set_case(restored, case_path)
     assert window.canvas.solution == first_solution
+    assert window._convergence_history == first_history
+    assert window._cpu_time_offset == first_cpu_time
+    window.convergence_history_widget.refresh_plot()
+    assert window.convergence_history_widget.plot.x_values == (
+        float(first_history[0][0]),
+    )
     window.numerics_panel.end_time_spin.setValue(20.0)
     assert window.canvas.solution == first_solution
     assert window.case.solution_time == first_time
+    assert window._convergence_history == first_history
 
     window._on_run()
     worker = window._solver_worker
@@ -876,6 +890,9 @@ def test_running_again_continues_from_current_solution(qtbot, tmp_path):
 
     assert window.case.solution_time > first_time
     assert window.case.solution_steps == 2
+    assert len(window.case.convergence_history) == len(first_history) + 1
+    assert window.case.convergence_history[: len(first_history)] == first_history
+    assert window.case.solution_cpu_time >= first_cpu_time
 
 
 def test_live_solution_toggle_is_logged_and_used_for_new_runs(qtbot):

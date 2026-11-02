@@ -226,7 +226,7 @@ def test_case_saves_relative_mesh_reference_and_reloads_mesh(tmp_path):
     save_case(case_path, case)
 
     saved_data = json.loads(case_path.read_text(encoding="utf-8"))
-    assert saved_data["version"] == 11
+    assert saved_data["version"] == 12
     assert saved_data["mesh"] == "../mesh.json"
     assert isinstance(saved_data["mesh"], str)
 
@@ -261,13 +261,18 @@ def test_case_round_trip_preserves_final_solution(tmp_path):
     case.final_solution = (InitialState(0.9, 12.0, -3.0, 98000.0),)
     case.solution_time = 0.25
     case.solution_steps = 17
+    case.solution_cpu_time = 4.5
+    case.convergence_history = [
+        (10, 0.15, 2.5, (0.4, 0.3, 0.2, 0.1)),
+        (17, 0.25, 4.0, (0.2, 0.15, 0.1, 0.05)),
+    ]
     path = tmp_path / "solved.mcf.json"
 
     save_case(path, case)
     saved_data = json.loads(path.read_text(encoding="utf-8"))
     restored = load_case(path)
 
-    assert saved_data["version"] == 11
+    assert saved_data["version"] == 12
     assert saved_data["final_solution"] == [
         {
             "density": 0.9,
@@ -281,7 +286,56 @@ def test_case_round_trip_preserves_final_solution(tmp_path):
     assert restored.final_solution == case.final_solution
     assert restored.solution_time == case.solution_time
     assert restored.solution_steps == case.solution_steps
+    assert restored.solution_cpu_time == case.solution_cpu_time
+    assert restored.convergence_history == case.convergence_history
     assert case_to_dict(restored) == case_to_dict(case)
+
+
+def test_case_loads_without_convergence_history_or_cpu_time():
+    data = case_to_dict(Case(name="legacy", mesh=make_mesh()))
+    data["version"] = 11
+    data["final_solution"] = [
+        {
+            "density": 1.0,
+            "velocity_x": 0.0,
+            "velocity_y": 0.0,
+            "pressure": 101325.0,
+            "turbulence_k": 1e-6,
+            "turbulence_omega": 1.0,
+        }
+    ]
+    data["solution_time"] = 0.1
+    data["solution_steps"] = 3
+    data.pop("solution_cpu_time")
+    data.pop("convergence_history")
+
+    restored = case_from_dict(data)
+
+    assert restored.solution_steps == 3
+    assert restored.solution_cpu_time == 0.0
+    assert restored.convergence_history == []
+
+
+def test_case_load_rejects_convergence_history_beyond_saved_solution():
+    data = case_to_dict(Case(name="solved", mesh=make_mesh()))
+    data["final_solution"] = [
+        {
+            "density": 1.0,
+            "velocity_x": 0.0,
+            "velocity_y": 0.0,
+            "pressure": 101325.0,
+            "turbulence_k": 1e-6,
+            "turbulence_omega": 1.0,
+        }
+    ]
+    data["solution_steps"] = 2
+    data["solution_cpu_time"] = 1.0
+    data["convergence_history"] = [
+        {"step": 3, "time": 0.1, "cpu_time": 0.5, "residuals": [1, 1, 1, 1]}
+    ]
+
+    with pytest.raises(ValueError, match="exceeds solution steps"):
+        case_from_dict(data)
 
 
 def test_legacy_case_without_final_solution_loads_without_one():
@@ -347,7 +401,7 @@ def test_periodic_pair_detection_and_case_round_trip(tmp_path):
     assert restored.periodic_pairs == case.periodic_pairs
     assert restored.boundary_conditions[1].kind == "Periodic"
     assert restored.boundary_conditions[3].kind == "Periodic"
-    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 11
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 12
 
 
 def test_regularized_sst_formulation_round_trips(tmp_path):
@@ -362,7 +416,7 @@ def test_regularized_sst_formulation_round_trips(tmp_path):
     assert restored.numerics.turbulence_omega_formulation == (
         "Regularized k-log-omega"
     )
-    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 11
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 12
 
 
 def test_adaptive_mesh_settings_and_hierarchy_round_trip(tmp_path):

@@ -153,6 +153,10 @@ class Case:
     final_solution: tuple[InitialState, ...] | None = None
     solution_time: float = 0.0
     solution_steps: int = 0
+    solution_cpu_time: float = 0.0
+    convergence_history: list[
+        tuple[int, float, float, tuple[float, ...]]
+    ] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.mesh is not None and not self.boundary_conditions:
@@ -173,6 +177,8 @@ class Case:
         self.final_solution = None
         self.solution_time = 0.0
         self.solution_steps = 0
+        self.solution_cpu_time = 0.0
+        self.convergence_history.clear()
         self.boundary_conditions = [
             BoundaryCondition(
                 patch_id=patch.id,

@@ -28,7 +28,7 @@ from meshcfd.core.periodic import detect_periodic_pair
 from meshcfd.io.mesh_io import load_mesh, mesh_from_dict, mesh_to_dict
 
 PROJECT_FORMAT = "meshcfd-case"
-PROJECT_VERSION = 11
+PROJECT_VERSION = 12
 
 
 def case_to_dict(
@@ -124,8 +124,24 @@ def case_to_dict(
             ) from error
     initial_conditions = _initial_conditions_to_dict(case.initial_conditions)
     final_solution = _final_solution_to_dict(case.final_solution, case.mesh)
+    convergence_history = _convergence_history_to_dict(
+        case.convergence_history, case.solution_steps
+    )
+    solution_cpu_time = _finite_non_negative_float(
+        case.solution_cpu_time, "Solution CPU time"
+    )
+    if (
+        convergence_history
+        and solution_cpu_time < convergence_history[-1]["cpu_time"]
+    ):
+        raise ValueError("Solution CPU time must include the convergence history.")
     if case.final_solution is None:
-        if case.solution_time != 0.0 or case.solution_steps != 0:
+        if (
+            case.solution_time != 0.0
+            or case.solution_steps != 0
+            or solution_cpu_time != 0.0
+            or convergence_history
+        ):
             raise ValueError("Solution time and steps require a final solution.")
         solution_time = 0.0
         solution_steps = 0
@@ -208,6 +224,8 @@ def case_to_dict(
         "final_solution": final_solution,
         "solution_time": solution_time,
         "solution_steps": solution_steps,
+        "solution_cpu_time": solution_cpu_time,
+        "convergence_history": convergence_history,
     }
 
 
@@ -226,6 +244,7 @@ def case_from_dict(
         8,
         9,
         10,
+        11,
         PROJECT_VERSION,
     ):
         raise ValueError(
@@ -488,8 +507,21 @@ def case_from_dict(
     solution_steps = _non_negative_integer(
         data.get("solution_steps", 0), "Solution steps"
     )
-    if final_solution is None and (solution_time != 0.0 or solution_steps != 0):
+    solution_cpu_time = _finite_non_negative_float(
+        data.get("solution_cpu_time", 0.0), "Solution CPU time"
+    )
+    convergence_history = _convergence_history_from_dict(
+        data.get("convergence_history", []), solution_steps
+    )
+    if final_solution is None and (
+        solution_time != 0.0
+        or solution_steps != 0
+        or solution_cpu_time != 0.0
+        or convergence_history
+    ):
         raise ValueError("Solution time and steps require a final solution.")
+    if convergence_history and solution_cpu_time < convergence_history[-1][2]:
+        raise ValueError("Solution CPU time must include the convergence history.")
 
     if mesh is not None:
         valid_patches = {patch.id: patch.name for patch in mesh.patches}
@@ -520,6 +552,8 @@ def case_from_dict(
         final_solution=final_solution,
         solution_time=solution_time,
         solution_steps=solution_steps,
+        solution_cpu_time=solution_cpu_time,
+        convergence_history=convergence_history,
     )
 
 
@@ -600,6 +634,91 @@ def _final_solution_from_dict(
             )
         )
     return tuple(states)
+
+
+def _convergence_history_to_dict(
+    history: list[tuple[int, float, float, tuple[float, ...]]],
+    solution_steps: int,
+) -> list[dict[str, Any]]:
+    if not isinstance(history, list):
+        raise ValueError("Convergence history must be a list.")
+    validated: list[tuple[int, float, float, tuple[float, ...]]] = []
+    for entry in history:
+        if not isinstance(entry, tuple) or len(entry) != 4:
+            raise ValueError("Each convergence history entry must have four values.")
+        step, time, cpu_time, residuals = entry
+        if not isinstance(residuals, tuple) or len(residuals) not in (4, 6):
+            raise ValueError("Convergence history must contain four or six residuals.")
+        validated.append(
+            (
+                _positive_integer(step, "Convergence history step"),
+                _finite_non_negative_float(time, "Convergence history time"),
+                _finite_non_negative_float(
+                    cpu_time, "Convergence history CPU time"
+                ),
+                tuple(
+                    _finite_non_negative_float(value, "Convergence residual")
+                    for value in residuals
+                ),
+            )
+        )
+    history_values = _convergence_history_validated(
+        validated, solution_steps
+    )
+    return [
+        {
+            "step": step,
+            "time": time,
+            "cpu_time": cpu_time,
+            "residuals": list(residuals),
+        }
+        for step, time, cpu_time, residuals in history_values
+    ]
+
+
+def _convergence_history_from_dict(
+    raw_history: Any, solution_steps: int
+) -> list[tuple[int, float, float, tuple[float, ...]]]:
+    if not isinstance(raw_history, list):
+        raise ValueError("Convergence history must be a list.")
+    history = []
+    for entry in raw_history:
+        if not isinstance(entry, dict):
+            raise ValueError("Each convergence history entry must be an object.")
+        step = _positive_integer(entry.get("step"), "Convergence history step")
+        time = _finite_non_negative_float(
+            entry.get("time"), "Convergence history time"
+        )
+        cpu_time = _finite_non_negative_float(
+            entry.get("cpu_time"), "Convergence history CPU time"
+        )
+        raw_residuals = entry.get("residuals")
+        if not isinstance(raw_residuals, list) or len(raw_residuals) not in (4, 6):
+            raise ValueError("Convergence history must contain four or six residuals.")
+        residuals = tuple(
+            _finite_non_negative_float(value, "Convergence residual")
+            for value in raw_residuals
+        )
+        history.append((step, time, cpu_time, residuals))
+    return _convergence_history_validated(history, solution_steps)
+
+
+def _convergence_history_validated(
+    history: list[tuple[int, float, float, tuple[float, ...]]],
+    solution_steps: int,
+) -> list[tuple[int, float, float, tuple[float, ...]]]:
+    previous_step = 0
+    previous_time = 0.0
+    previous_cpu_time = 0.0
+    for step, time, cpu_time, _residuals in history:
+        if step > solution_steps:
+            raise ValueError("Convergence history step exceeds solution steps.")
+        if step <= previous_step or time < previous_time or cpu_time < previous_cpu_time:
+            raise ValueError("Convergence history values must be nondecreasing.")
+        previous_step = step
+        previous_time = time
+        previous_cpu_time = cpu_time
+    return history
 
 
 def _periodic_pairs_from_dict(

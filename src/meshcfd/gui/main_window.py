@@ -190,7 +190,6 @@ class MainWindow(QMainWindow):
             tuple[int, float, float, tuple[float, ...]]
         ] = []
         self._cpu_time_offset = 0.0
-        self._history_revision = self._case_revision
         self._dirty = False
         self.setMinimumSize(640, 480)
         self.resize(1400, 850)
@@ -604,11 +603,10 @@ class MainWindow(QMainWindow):
 
     def _set_case(self, case: Case, path: Path | None) -> None:
         self._case_revision += 1
-        self._convergence_history.clear()
-        self._cpu_time_offset = 0.0
-        self._history_revision = self._case_revision
         self.case = case
         self.current_path = path
+        self._convergence_history = list(case.convergence_history)
+        self._cpu_time_offset = case.solution_cpu_time
         self._simulation_solution = None
         self._latest_solution_progress = None
         self._dirty = False
@@ -618,6 +616,7 @@ class MainWindow(QMainWindow):
         self.initial_conditions_panel.set_case(case)
         self._update_mesh_info()
         self._refresh_solution(preserve_saved_solution=True)
+        self.convergence_history_widget.refresh_plot()
         self._update_results_actions()
         self._update_title()
         self._log_output(f"Loaded case settings: {case.name}.")
@@ -635,6 +634,11 @@ class MainWindow(QMainWindow):
             self.case.final_solution = None
             self.case.solution_time = 0.0
             self.case.solution_steps = 0
+            self.case.solution_cpu_time = 0.0
+            self.case.convergence_history.clear()
+            self._convergence_history.clear()
+            self._cpu_time_offset = 0.0
+            self.convergence_history_widget.refresh_plot()
         if self.case.mesh is None:
             self._initial_solution = None
             self.canvas.set_solution(None)
@@ -666,6 +670,11 @@ class MainWindow(QMainWindow):
         self.case.final_solution = None
         self.case.solution_time = 0.0
         self.case.solution_steps = 0
+        self.case.solution_cpu_time = 0.0
+        self.case.convergence_history.clear()
+        self._convergence_history.clear()
+        self._cpu_time_offset = 0.0
+        self.convergence_history_widget.refresh_plot()
         self._update_visualization()
         self._update_results_actions()
 
@@ -1005,11 +1014,6 @@ class MainWindow(QMainWindow):
                 self, "No Mesh", "Import a finite-volume mesh before setting up a run."
             )
             return
-        if self._history_revision != self._case_revision:
-            self._convergence_history.clear()
-            self._cpu_time_offset = 0.0
-            self._history_revision = self._case_revision
-            self._update_results_actions()
         snapshot = copy.deepcopy(self.case)
         initial_states = copy.deepcopy(
             self._simulation_solution or self._initial_solution
@@ -1161,7 +1165,6 @@ class MainWindow(QMainWindow):
                 self, "Solver Error", "The solver finished without producing a result."
             )
             return
-        settings_unchanged = self._run_revision == self._case_revision
         self._cpu_time_offset = result.cpu_time
         if worker.case.mesh != self.case.mesh:
             self.case.mesh = worker.case.mesh
@@ -1176,11 +1179,11 @@ class MainWindow(QMainWindow):
         self.case.final_solution = result.states
         self.case.solution_time = result.time
         self.case.solution_steps = result.steps
+        self.case.solution_cpu_time = result.cpu_time
+        self.case.convergence_history = list(self._convergence_history)
         self._update_visualization()
         self._update_results_actions()
         self._mark_dirty()
-        if settings_unchanged:
-            self._history_revision = self._case_revision
         if result.completed:
             message = (
                 f"Completed at t = {result.time:.6g} in {result.steps} steps "
