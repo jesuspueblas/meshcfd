@@ -199,10 +199,22 @@ class ColorLegend(QWidget):
         painter = QPainter(self)
         vertical = self.orientation == "Vertical"
         if vertical:
-            bar = self.rect().adjusted(8, 28, -62, -8)
+            label_width = min(54, max(20, self.width() // 3))
+            top_margin = min(28, max(12, self.height() // 5))
+            bar_width = max(1, self.width() - label_width - 20)
+            bar_height = max(1, self.height() - top_margin - 12)
+            bar = QRect(8, top_margin, bar_width, bar_height)
             gradient = QLinearGradient(0, bar.bottom(), 0, bar.top())
         else:
-            bar = self.rect().adjusted(28, 24, -28, -20)
+            horizontal_margin = min(28, max(8, self.width() // 8))
+            top_margin = min(24, max(10, self.height() // 3))
+            bottom_margin = min(20, max(6, self.height() // 4))
+            bar = QRect(
+                horizontal_margin,
+                top_margin,
+                max(1, self.width() - 2 * horizontal_margin),
+                max(1, self.height() - top_margin - bottom_margin),
+            )
             gradient = QLinearGradient(bar.left(), 0, bar.right(), 0)
         stops = COLOR_MAPS[self.palette]
         for index, stop in enumerate(stops):
@@ -232,7 +244,9 @@ class ColorLegend(QWidget):
                 vertical_ticks = tuple(reversed(ticks))
                 for fraction, value in zip((0.0, 0.5, 1.0), vertical_ticks):
                     position = round(bar.top() + fraction * bar.height())
-                    painter.drawLine(bar.right(), position, bar.right() + 3, position)
+                    painter.drawLine(
+                        bar.right(), position, min(self.width() - 1, bar.right() + 3), position
+                    )
                     label = f"{value:.4g}"
                     painter.drawText(
                         bar.right() + 7,
@@ -297,6 +311,7 @@ class _ColorBarResizeHandle(QWidget):
                 max(self.overlay.minimumWidth(), self._start_size.width() + delta.x()),
                 max(self.overlay.minimumHeight(), self._start_size.height() + delta.y()),
             )
+            self.overlay.remember_size_fraction()
             self.overlay.move_to(self.overlay.pos())
             event.accept()
             return
@@ -316,7 +331,7 @@ class ColorBarOverlay(QFrame):
         self.orientation = "Horizontal"
         self.setObjectName("color_bar_overlay")
         self.setFrameShape(QFrame.StyledPanel)
-        self.setMinimumSize(82, 82)
+        self.setMinimumSize(1, 1)
         self.resize(310, 72)
         self.setStyleSheet(
             "#color_bar_overlay { background: #FFFFFF; border: 1px solid #94A3B8; }"
@@ -335,6 +350,7 @@ class ColorBarOverlay(QFrame):
         layout.addLayout(legend_row)
         self.legend.installEventFilter(self)
         self.legend.setCursor(Qt.SizeAllCursor)
+        self._size_fraction: tuple[float, float] | None = None
         self.move_to(self._position)
         self.hide()
 
@@ -350,15 +366,50 @@ class ColorBarOverlay(QFrame):
         self.legend.set_values(
             values, palette, scale, value_range, orientation, variable
         )
-        if orientation != self.orientation:
+        orientation_changed = orientation != self.orientation
+        if orientation_changed:
             self.orientation = orientation
-            if orientation == "Vertical":
-                self.setMinimumSize(135, 170)
-                self.resize(150, 250)
-            else:
-                self.setMinimumSize(250, 62)
-                self.resize(310, 72)
-            self.move_to(self._position)
+            self._size_fraction = None
+        self.resize_to_viewport()
+        self.move_to(self._position)
+
+    def resize_to_viewport(self) -> None:
+        bounds = self.parentWidget().size()
+        if self._size_fraction is None:
+            if bounds.width() <= 0 or bounds.height() <= 0:
+                return
+            default_size = (
+                QSize(150, 250)
+                if self.orientation == "Vertical"
+                else QSize(310, 72)
+            )
+            if (
+                bounds.width() < default_size.width()
+                or bounds.height() < default_size.height()
+            ):
+                self.resize(
+                    min(bounds.width(), default_size.width()),
+                    min(bounds.height(), default_size.height()),
+                )
+                return
+            self._size_fraction = (
+                min(0.9, default_size.width() / bounds.width()),
+                min(0.9, default_size.height() / bounds.height()),
+            )
+        width_fraction, height_fraction = self._size_fraction
+        width_fraction = min(width_fraction, 0.95)
+        height_fraction = min(height_fraction, 0.95)
+        width = max(1, min(bounds.width(), round(bounds.width() * width_fraction)))
+        height = max(1, min(bounds.height(), round(bounds.height() * height_fraction)))
+        self.resize(width, height)
+
+    def remember_size_fraction(self) -> None:
+        bounds = self.parentWidget().size()
+        if bounds.width() > 0 and bounds.height() > 0:
+            self._size_fraction = (
+                self.width() / bounds.width(),
+                self.height() / bounds.height(),
+            )
 
     def move_to(self, position: QPoint) -> None:
         bounds = self.parentWidget().rect()
@@ -421,6 +472,7 @@ class MeshCanvas(QGraphicsView):
         )
         self._cell_bounds: tuple[tuple[float, float, float, float], ...] = ()
         self._cell_centers: tuple[tuple[float, float], ...] = ()
+        self._content_scene_rect = QRectF()
         self._smooth_cache_key = None
         self._smooth_cache: tuple[QImage, QRectF] | None = None
         self.color_bar_overlay = ColorBarOverlay(self)
@@ -736,6 +788,8 @@ class MeshCanvas(QGraphicsView):
     def _draw_mesh(self, fit: bool = False) -> None:
         self.scene().clear()
         if self.mesh is None:
+            self._content_scene_rect = QRectF()
+            self.scene().setSceneRect(QRectF(-1.0, -1.0, 2.0, 2.0))
             self._show_empty_message()
             return
 
@@ -758,7 +812,7 @@ class MeshCanvas(QGraphicsView):
                     polygon.append(QPointF(x, y))
                 item = QGraphicsPolygonItem(polygon)
                 if self.show_mesh:
-                    pen = QPen(QColor("#94A3B8"), 0.7)
+                    pen = QPen(QColor("#000000"), 0.7)
                     pen.setCosmetic(True)
                     item.setPen(pen)
                 else:
@@ -770,48 +824,76 @@ class MeshCanvas(QGraphicsView):
 
         if not self.show_mesh:
             self._draw_solution_cut()
-            bounds = self.scene().itemsBoundingRect()
-            margin = max(1.0, max(bounds.width(), bounds.height()) * 0.04)
-            bounds.adjust(-margin, -margin, margin, margin)
-            self.scene().setSceneRect(bounds)
-            if fit:
-                self.fitInView(bounds, Qt.KeepAspectRatio)
-            return
+        else:
+            for face_id, (start_id, end_id) in enumerate(self.mesh.faces):
+                x0, y0 = self.mesh.points[start_id]
+                x1, y1 = self.mesh.points[end_id]
+                patch_id = self.mesh.face_patch_ids[face_id]
+                is_boundary = patch_id >= 0
+                selected = patch_id == self.selected_patch_id
+                if is_boundary:
+                    patch_index = next(
+                        index
+                        for index, patch in enumerate(self.mesh.patches)
+                        if patch.id == patch_id
+                    )
+                    color = PATCH_COLORS[patch_index % len(PATCH_COLORS)]
+                    width = 3.0 if selected else 1.6
+                else:
+                    color = QColor("#000000")
+                    width = 0.7
+                if not selected:
+                    color = QColor("#000000")
+                pen = QPen(color, width)
+                pen.setCosmetic(True)
+                item = QGraphicsLineItem(x0, y0, x1, y1)
+                item.setPen(pen)
+                self.scene().addItem(item)
 
-        for face_id, (start_id, end_id) in enumerate(self.mesh.faces):
-            x0, y0 = self.mesh.points[start_id]
-            x1, y1 = self.mesh.points[end_id]
-            patch_id = self.mesh.face_patch_ids[face_id]
-            is_boundary = patch_id >= 0
-            selected = patch_id == self.selected_patch_id
-            if is_boundary:
-                patch_index = next(
-                    index
-                    for index, patch in enumerate(self.mesh.patches)
-                    if patch.id == patch_id
-                )
-                color = PATCH_COLORS[patch_index % len(PATCH_COLORS)]
-                width = 3.0 if selected else 1.6
-            else:
-                color = QColor("#CBD5E1")
-                width = 0.7
-            pen = QPen(color, width)
-            pen.setCosmetic(True)
-            item = QGraphicsLineItem(x0, y0, x1, y1)
-            item.setPen(pen)
-            self.scene().addItem(item)
+            self._draw_solution_cut()
 
-        self._draw_solution_cut()
-        bounds = self.scene().itemsBoundingRect()
+        if fit:
+            self._set_content_scene_rect(self._mesh_content_bounds(), fit=True)
+
+    def _mesh_content_bounds(self) -> QRectF:
+        assert self.mesh is not None
+        if not self.mesh.points:
+            return QRectF(-0.5, -0.5, 1.0, 1.0)
+        min_x = min(point[0] for point in self.mesh.points)
+        min_y = min(point[1] for point in self.mesh.points)
+        max_x = max(point[0] for point in self.mesh.points)
+        max_y = max(point[1] for point in self.mesh.points)
+        bounds = QRectF(min_x, min_y, max_x - min_x, max_y - min_y)
         if bounds.width() < 1e-9:
             bounds.adjust(-0.5, 0.0, 0.5, 0.0)
         if bounds.height() < 1e-9:
             bounds.adjust(0.0, -0.5, 0.0, 0.5)
         margin = max(1.0, max(bounds.width(), bounds.height()) * 0.04)
         bounds.adjust(-margin, -margin, margin, margin)
+        return bounds
+
+    def _set_content_scene_rect(self, bounds: QRectF, fit: bool) -> None:
+        self._content_scene_rect = QRectF(bounds)
         self.scene().setSceneRect(bounds)
         if fit:
-            self.fitInView(bounds, Qt.KeepAspectRatio)
+            self.reset_zoom()
+        self._expand_scene_rect_for_panning()
+
+    def _expand_scene_rect_for_panning(self) -> None:
+        if self._content_scene_rect.isEmpty():
+            return
+        visible = self.mapToScene(self.viewport().rect()).boundingRect()
+        center = visible.center()
+        width = max(visible.width() * 4.0, self._content_scene_rect.width() * 2.0)
+        height = max(visible.height() * 4.0, self._content_scene_rect.height() * 2.0)
+        bounds = QRectF(
+            center.x() - width / 2.0,
+            center.y() - height / 2.0,
+            width,
+            height,
+        )
+        self.scene().setSceneRect(bounds.united(self._content_scene_rect))
+        self.centerOn(center)
 
     def _smooth_solution_image(
         self, values: tuple[float, ...]
@@ -963,6 +1045,8 @@ class MeshCanvas(QGraphicsView):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        self._expand_scene_rect_for_panning()
+        self.color_bar_overlay.resize_to_viewport()
         self.color_bar_overlay.move_to(self.color_bar_overlay._position)
 
     def scrollContentsBy(self, dx: int, dy: int) -> None:
@@ -971,8 +1055,10 @@ class MeshCanvas(QGraphicsView):
             self.color_bar_overlay.move_to(self.color_bar_overlay._position)
 
     def reset_zoom(self) -> None:
-        if self.mesh is not None:
-            self.fitInView(self.scene().sceneRect(), Qt.KeepAspectRatio)
+        if self.mesh is not None and not self._content_scene_rect.isEmpty():
+            self.fitInView(self._content_scene_rect, Qt.KeepAspectRatio)
+            self._expand_scene_rect_for_panning()
+            self.centerOn(self._content_scene_rect.center())
 
     def wheelEvent(self, event) -> None:
         factor = 1.15 if event.angleDelta().y() > 0 else 1.0 / 1.15

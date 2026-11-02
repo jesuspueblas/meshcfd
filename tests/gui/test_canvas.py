@@ -1,7 +1,12 @@
 import pytest
 from PyQt5.QtCore import QEvent, QPoint, QPointF, Qt
 from PyQt5.QtGui import QColor, QMouseEvent
-from PyQt5.QtWidgets import QApplication, QGraphicsPixmapItem, QGraphicsPolygonItem
+from PyQt5.QtWidgets import (
+    QApplication,
+    QGraphicsLineItem,
+    QGraphicsPixmapItem,
+    QGraphicsPolygonItem,
+)
 
 from meshcfd.core.model import Case, FiniteVolumeMesh, InitialState, MeshPatch
 from meshcfd.gui.canvas import COLOR_MAPS, ColorLegend, MeshCanvas, color_values
@@ -82,6 +87,29 @@ def test_solution_is_colored_per_cell_and_mesh_edges_can_be_hidden(qtbot):
     item = canvas.scene().items()[0]
     assert item.brush().color() != QColor("#F1F5F9")
     assert item.pen().style() == Qt.NoPen
+
+
+def test_mesh_edges_are_black_by_default(qtbot):
+    canvas = MeshCanvas()
+    qtbot.addWidget(canvas)
+    canvas.set_mesh(make_two_cell_mesh())
+    canvas.set_solution((InitialState(), InitialState()))
+    canvas.set_display_options(
+        show_grid=False,
+        show_mesh=True,
+        solution_variable="Density",
+        color_map="Viridis",
+        color_scale="Linear",
+    )
+
+    mesh_lines = [
+        item
+        for item in canvas.scene().items()
+        if isinstance(item, QGraphicsLineItem) and item.data(0) is None
+    ]
+
+    assert len(mesh_lines) == len(make_two_cell_mesh().faces)
+    assert all(item.pen().color() == QColor("#000000") for item in mesh_lines)
 
 
 @pytest.mark.parametrize(
@@ -394,6 +422,124 @@ def test_box_zoom_fits_the_dragged_rectangle(qtbot):
     assert not canvas._zoom_rubber_band.isVisible()
 
 
+def test_middle_button_pan_works_at_reset_zoom(qtbot):
+    canvas = MeshCanvas()
+    qtbot.addWidget(canvas)
+    canvas.resize(500, 400)
+    canvas.set_mesh(make_mesh())
+    canvas.show()
+    qtbot.waitExposed(canvas)
+    canvas.reset_zoom()
+    assert canvas.horizontalScrollBar().maximum() > 0
+    assert canvas.verticalScrollBar().maximum() > 0
+    initial_position = canvas.mapFromScene(QPointF(0.5, 0.5))
+    start = QPoint(200, 200)
+    end = start + QPoint(40, 25)
+
+    send_canvas_mouse_event(
+        canvas, QEvent.MouseButtonPress, start, Qt.MiddleButton, Qt.MiddleButton
+    )
+    send_canvas_mouse_event(
+        canvas, QEvent.MouseMove, end, Qt.NoButton, Qt.MiddleButton
+    )
+    send_canvas_mouse_event(
+        canvas, QEvent.MouseButtonRelease, end, Qt.MiddleButton, Qt.NoButton
+    )
+
+    assert canvas.mapFromScene(QPointF(0.5, 0.5)) == initial_position + QPoint(40, 25)
+
+
+def test_display_option_changes_preserve_zoom_and_pan(qtbot):
+    canvas = MeshCanvas()
+    qtbot.addWidget(canvas)
+    canvas.resize(500, 400)
+    canvas.set_mesh(make_two_cell_mesh())
+    canvas.set_solution(
+        (InitialState(density=1.0), InitialState(density=2.0))
+    )
+    canvas.set_display_options(
+        show_grid=True,
+        show_mesh=True,
+        solution_variable="Density",
+        color_map="Viridis",
+        color_scale="Linear",
+    )
+    canvas.show()
+    qtbot.waitExposed(canvas)
+    canvas.reset_zoom()
+    canvas.scale(1.7, 1.7)
+    canvas.horizontalScrollBar().setValue(
+        canvas.horizontalScrollBar().value() + 15
+    )
+    canvas.verticalScrollBar().setValue(
+        canvas.verticalScrollBar().value() + 10
+    )
+    scene_point = QPointF(0.5, 0.5)
+    initial_position = canvas.mapFromScene(scene_point)
+    initial_transform = canvas.transform()
+
+    canvas.set_display_options(
+        show_grid=False,
+        show_mesh=False,
+        solution_variable="Density",
+        color_map="Plasma",
+        color_scale="Linear",
+        smooth_colors=True,
+    )
+    assert canvas.mapFromScene(scene_point) == initial_position
+    assert canvas.transform() == initial_transform
+
+    canvas.set_display_options(
+        show_grid=True,
+        show_mesh=True,
+        solution_variable="Pressure",
+        color_map="Turbo",
+        color_scale="Linear",
+        smooth_colors=False,
+    )
+    assert canvas.mapFromScene(scene_point) == initial_position
+    assert canvas.transform() == initial_transform
+
+
+def test_replacing_mesh_resets_zoom_and_centers_new_mesh(qtbot):
+    canvas = MeshCanvas()
+    qtbot.addWidget(canvas)
+    canvas.resize(500, 400)
+    canvas.set_mesh(make_two_cell_mesh())
+    canvas.show()
+    qtbot.waitExposed(canvas)
+    canvas.reset_zoom()
+    canvas.scale(2.0, 2.0)
+    canvas.horizontalScrollBar().setValue(
+        canvas.horizontalScrollBar().value() + 30
+    )
+    canvas.verticalScrollBar().setValue(
+        canvas.verticalScrollBar().value() + 20
+    )
+
+    mesh = make_two_cell_mesh()
+    translated_mesh = mesh.__class__(
+        points=tuple((x + 10.0, y - 4.0) for x, y in mesh.points),
+        cells=mesh.cells,
+        faces=mesh.faces,
+        face_owners=mesh.face_owners,
+        face_neighbours=mesh.face_neighbours,
+        face_patch_ids=mesh.face_patch_ids,
+        patches=mesh.patches,
+        cell_face_ids=mesh.cell_face_ids,
+        cell_face_signs=mesh.cell_face_signs,
+    )
+    canvas.set_mesh(translated_mesh)
+
+    mesh_center = QPointF(11.0, -3.5)
+    viewport_center = canvas.viewport().rect().center()
+    mapped_center = canvas.mapFromScene(mesh_center)
+    assert abs(mapped_center.x() - viewport_center.x()) <= 2
+    assert abs(mapped_center.y() - viewport_center.y()) <= 2
+    assert canvas.horizontalScrollBar().maximum() > 0
+    assert canvas.verticalScrollBar().maximum() > 0
+
+
 def test_cell_info_reports_zero_based_index_centroid_and_active_field(qtbot):
     canvas = MeshCanvas()
     qtbot.addWidget(canvas)
@@ -627,3 +773,42 @@ def test_color_bar_stays_fixed_in_viewport_while_scrolling(qtbot):
     vertical_scrollbar.setValue(vertical_scrollbar.maximum())
 
     assert overlay.pos() == position
+
+
+def test_color_bar_resizes_with_canvas_and_recovers_when_canvas_grows(qtbot):
+    canvas = MeshCanvas()
+    qtbot.addWidget(canvas)
+    canvas.resize(600, 400)
+    canvas.set_mesh(make_mesh())
+    canvas.set_solution((InitialState(),))
+    canvas.set_display_options(
+        show_grid=False,
+        show_mesh=True,
+        solution_variable="Density",
+        color_map="Viridis",
+        color_scale="Linear",
+        show_colorbar=True,
+        colorbar_orientation="Vertical",
+    )
+    canvas.show()
+    qtbot.waitExposed(canvas)
+    overlay = canvas.color_bar_overlay
+    large_size = overlay.size()
+
+    canvas.resize(260, 180)
+    qtbot.waitUntil(
+        lambda: overlay.width() <= canvas.viewport().width()
+        and overlay.height() <= canvas.viewport().height()
+    )
+    small_size = overlay.size()
+    assert small_size.width() < large_size.width()
+    assert small_size.height() < large_size.height()
+    overlay.grab()
+
+    canvas.resize(900, 600)
+    qtbot.waitUntil(
+        lambda: overlay.width() > small_size.width()
+        and overlay.height() > small_size.height()
+    )
+    assert overlay.width() <= canvas.viewport().width()
+    assert overlay.height() <= canvas.viewport().height()

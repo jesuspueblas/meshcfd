@@ -85,6 +85,31 @@ def test_main_window_initial_state(qtbot):
         assert dock.allowedAreas() == Qt.AllDockWidgetAreas
 
 
+def test_loading_case_resets_canvas_zoom_and_centers_mesh(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.resize(1400, 900)
+    window.show()
+    qtbot.waitExposed(window)
+    window.canvas.scale(2.0, 2.0)
+    window.canvas.horizontalScrollBar().setValue(
+        window.canvas.horizontalScrollBar().value() + 30
+    )
+    window.canvas.verticalScrollBar().setValue(
+        window.canvas.verticalScrollBar().value() + 20
+    )
+
+    case = Case()
+    case.set_mesh(make_mesh())
+    window._set_case(case, None)
+
+    mesh_center = QPointF(0.5, 0.5)
+    viewport_center = window.canvas.viewport().rect().center()
+    mapped_center = window.canvas.mapFromScene(mesh_center)
+    assert abs(mapped_center.x() - viewport_center.x()) <= 2
+    assert abs(mapped_center.y() - viewport_center.y()) <= 2
+
+
 def test_implicit_integrator_enables_large_cfl_only_for_implicit(qtbot):
     window = MainWindow()
     qtbot.addWidget(window)
