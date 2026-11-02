@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable
 
 import numpy as np
+from scipy.sparse import coo_matrix, eye, kron, tril, triu
+from scipy.sparse.linalg import (
+    LinearOperator,
+    gmres,
+    spilu,
+    spsolve_triangular,
+)
 
 from meshcfd.core.adaptation import (
     adapt_mesh,
@@ -173,18 +180,37 @@ def solve_case(
         "Explicit Euler",
         "Explicit RK2",
         "Explicit RK3",
+        "Explicit RK4",
+        "Implicit Euler",
     ):
         raise SolverError(
             f"Unsupported time integration '{settings.time_integration}'."
         )
-    if not math.isfinite(settings.cfl) or not 0.0 < settings.cfl <= 1.0:
-        raise SolverError("The explicit Euler solver requires a CFL number in (0, 1].")
+    maximum_cfl = 1000.0 if settings.time_integration == "Implicit Euler" else 1.0
+    if not math.isfinite(settings.cfl) or not 0.0 < settings.cfl <= maximum_cfl:
+        raise SolverError(
+            f"{settings.time_integration} requires a CFL number in (0, "
+            f"{maximum_cfl:g}]."
+        )
     if (
         isinstance(settings.max_iterations, bool)
         or not isinstance(settings.max_iterations, int)
         or settings.max_iterations <= 0
     ):
         raise SolverError("Maximum iterations must be a positive integer.")
+    if (
+        not math.isfinite(settings.gmres_tolerance)
+        or not 0.0 < settings.gmres_tolerance < 1.0
+    ):
+        raise SolverError("GMRES tolerance must be finite and in (0, 1).")
+    for value, label in (
+        (settings.gmres_max_iterations, "Maximum GMRES iterations"),
+        (settings.gmres_krylov_dimension, "GMRES Krylov dimension"),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise SolverError(f"{label} must be a positive integer.")
+    if settings.implicit_preconditioner not in ("ILU", "LU-SGS"):
+        raise SolverError("Unsupported implicit preconditioner.")
     if not math.isfinite(settings.end_time) or settings.end_time <= 0.0:
         raise SolverError("End time must be positive and finite.")
     if not math.isfinite(start_time) or start_time < 0.0:
@@ -396,7 +422,43 @@ def solve_case(
                         turbulence_derivative,
                         settings,
                     )
-            if settings.time_integration == "Explicit Euler":
+            if settings.time_integration == "Implicit Euler":
+                packed_state = _pack_time_state(
+                    start, start_turbulence, regularized_omega
+                )
+                updated_state, time_step = _implicit_euler_step(
+                    packed_state, time_step, geometry, settings
+                )
+                (
+                    conservative,
+                    turbulence_conservative,
+                    regularized_omega,
+                ) = _unpack_time_state(
+                    updated_state,
+                    geometry,
+                    settings,
+                    start_turbulence is not None,
+                    regularized_omega is not None,
+                )
+            elif settings.time_integration == "Explicit RK4":
+                packed_state = _pack_time_state(
+                    start, start_turbulence, regularized_omega
+                )
+                updated_state = _explicit_rk4_step(
+                    packed_state, time_step, geometry, settings
+                )
+                (
+                    conservative,
+                    turbulence_conservative,
+                    regularized_omega,
+                ) = _unpack_time_state(
+                    updated_state,
+                    geometry,
+                    settings,
+                    start_turbulence is not None,
+                    regularized_omega is not None,
+                )
+            elif settings.time_integration == "Explicit Euler":
                 conservative = start + time_step * derivative
                 if start_turbulence is not None:
                     updated_k = np.maximum(
@@ -766,6 +828,491 @@ def solve_case(
     residual = float(np.sqrt(np.mean(final_residual**2)))
     states = _states_from_solution(final_primitive, turbulence_conservative)
     return SolverResult(states, time, steps, residual, completed)
+
+
+def _pack_time_state(
+    conservative: np.ndarray,
+    turbulence_conservative: np.ndarray | None,
+    regularized_omega: np.ndarray | None,
+) -> np.ndarray:
+    if turbulence_conservative is None:
+        return conservative.copy()
+    if regularized_omega is not None:
+        return np.column_stack(
+            (conservative, turbulence_conservative[:, 0], regularized_omega)
+        )
+    return np.column_stack((conservative, turbulence_conservative))
+
+
+def _unpack_time_state(
+    state: np.ndarray,
+    geometry: _Geometry,
+    settings: NumericalSettings,
+    has_turbulence: bool,
+    is_regularized: bool,
+) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None]:
+    conservative = state[:, :4].copy()
+    if not has_turbulence:
+        return conservative, None, None
+    if is_regularized:
+        k_conservative = np.maximum(state[:, 4], 0.0)
+        regularized_omega = state[:, 5].copy()
+        primitive = _primitive_from_conservative(
+            conservative,
+            np.column_stack((k_conservative, np.ones_like(k_conservative))),
+            settings.gamma,
+        )
+        turbulence = _sst_regularized_turbulence(
+            primitive, k_conservative, regularized_omega, geometry, settings
+        )
+        return conservative, turbulence, regularized_omega
+    turbulence = _positive_turbulence_state(state[:, 4:6])
+    return conservative, turbulence, None
+
+
+def _time_state_rhs(
+    state: np.ndarray,
+    geometry: _Geometry,
+    settings: NumericalSettings,
+) -> np.ndarray:
+    conservative = state[:, :4]
+    has_turbulence = state.shape[1] > 4
+    is_regularized = (
+        has_turbulence
+        and settings.turbulence_omega_formulation == "Regularized k-log-omega"
+    )
+    turbulence_conservative = None
+    regularized_omega = None
+    if has_turbulence:
+        if is_regularized:
+            k_conservative = np.maximum(state[:, 4], 0.0)
+            regularized_omega = state[:, 5]
+            primitive = _primitive_from_conservative(
+                conservative,
+                np.column_stack((k_conservative, np.ones_like(k_conservative))),
+                settings.gamma,
+            )
+            turbulence_conservative = _sst_regularized_turbulence(
+                primitive,
+                k_conservative,
+                regularized_omega,
+                geometry,
+                settings,
+            )
+        else:
+            turbulence_conservative = _positive_turbulence_state(state[:, 4:6])
+    primitive = _primitive_from_conservative(
+        conservative, turbulence_conservative, settings.gamma
+    )
+    flow_rate = _residual(
+        conservative, geometry, settings, turbulence_conservative
+    )
+    if turbulence_conservative is None:
+        return flow_rate
+    turbulence_rate = _sst_residual(
+        primitive,
+        turbulence_conservative / primitive[:, :1],
+        geometry,
+        settings,
+    )
+    if is_regularized:
+        omega_rate = _sst_regularized_rate(
+            primitive,
+            flow_rate,
+            turbulence_conservative,
+            turbulence_rate,
+            settings,
+        )
+        return np.column_stack((flow_rate, turbulence_rate[:, 0], omega_rate))
+    return np.column_stack((flow_rate, turbulence_rate))
+
+
+def _limit_time_state(
+    state: np.ndarray, settings: NumericalSettings
+) -> np.ndarray:
+    result = state.copy()
+    if result.shape[1] > 4:
+        result[:, 4] = np.maximum(result[:, 4], 0.0)
+        if settings.turbulence_omega_formulation != "Regularized k-log-omega":
+            result[:, 5] = np.maximum(result[:, 5], 1e-12)
+    return result
+
+
+def _explicit_rk4_step(
+    state: np.ndarray,
+    time_step: float,
+    geometry: _Geometry,
+    settings: NumericalSettings,
+) -> np.ndarray:
+    initial = _limit_time_state(state, settings)
+    derivative_one = _time_state_rhs(initial, geometry, settings)
+    stage_two = _limit_time_state(
+        initial + 0.5 * time_step * derivative_one, settings
+    )
+    derivative_two = _time_state_rhs(stage_two, geometry, settings)
+    stage_three = _limit_time_state(
+        initial + 0.5 * time_step * derivative_two, settings
+    )
+    derivative_three = _time_state_rhs(stage_three, geometry, settings)
+    stage_four = _limit_time_state(
+        initial + time_step * derivative_three, settings
+    )
+    derivative_four = _time_state_rhs(stage_four, geometry, settings)
+    return _limit_time_state(
+        initial
+        + (time_step / 6.0)
+        * (
+            derivative_one
+            + 2.0 * derivative_two
+            + 2.0 * derivative_three
+            + derivative_four
+        ),
+        settings,
+    )
+
+
+def _implicit_preconditioner(
+    primitive: np.ndarray,
+    geometry: _Geometry,
+    settings: NumericalSettings,
+    time_step: float,
+    variable_count: int,
+) -> LinearOperator:
+    cell_count = len(primitive)
+    diagonal = np.ones(cell_count)
+    rows = list(range(cell_count))
+    columns = list(range(cell_count))
+    entries = [1.0] * cell_count
+    sound_speed = _sound_speed(primitive, settings.gamma)
+
+    def add_interior_faces(faces: np.ndarray) -> None:
+        if not len(faces):
+            return
+        owners = geometry.owners[faces]
+        neighbours = geometry.neighbours[faces]
+        normal_velocity_owner = np.sum(
+            primitive[owners, 1:3] * geometry.face_normals[faces], axis=1
+        )
+        normal_velocity_neighbour = np.sum(
+            primitive[neighbours, 1:3] * geometry.face_normals[faces], axis=1
+        )
+        radius = np.maximum(
+            np.abs(normal_velocity_owner) + sound_speed[owners],
+            np.abs(normal_velocity_neighbour) + sound_speed[neighbours],
+        )
+        coefficients = 0.5 * time_step * radius * geometry.face_lengths[faces]
+        np.add.at(diagonal, owners, coefficients / geometry.areas[owners])
+        np.add.at(diagonal, neighbours, coefficients / geometry.areas[neighbours])
+        rows.extend(owners.tolist())
+        columns.extend(neighbours.tolist())
+        entries.extend((-coefficients / geometry.areas[owners]).tolist())
+        rows.extend(neighbours.tolist())
+        columns.extend(owners.tolist())
+        entries.extend((-coefficients / geometry.areas[neighbours]).tolist())
+
+    add_interior_faces(geometry.interior_faces)
+    if len(geometry.periodic_faces_a):
+        faces_a = geometry.periodic_faces_a
+        faces_b = geometry.periodic_faces_b
+        owners_a = geometry.owners[faces_a]
+        owners_b = geometry.owners[faces_b]
+        normal_velocity_a = np.sum(
+            primitive[owners_a, 1:3] * geometry.face_normals[faces_a], axis=1
+        )
+        normal_velocity_b = np.sum(
+            primitive[owners_b, 1:3] * geometry.face_normals[faces_b], axis=1
+        )
+        radius = np.maximum(
+            np.abs(normal_velocity_a) + sound_speed[owners_a],
+            np.abs(normal_velocity_b) + sound_speed[owners_b],
+        )
+        coefficients = (
+            0.5 * time_step * radius * geometry.face_lengths[faces_a]
+        )
+        np.add.at(diagonal, owners_a, coefficients / geometry.areas[owners_a])
+        np.add.at(diagonal, owners_b, coefficients / geometry.areas[owners_b])
+        rows.extend(owners_a.tolist())
+        columns.extend(owners_b.tolist())
+        entries.extend((-coefficients / geometry.areas[owners_a]).tolist())
+        rows.extend(owners_b.tolist())
+        columns.extend(owners_a.tolist())
+        entries.extend((-coefficients / geometry.areas[owners_b]).tolist())
+
+    boundary_faces = np.flatnonzero(geometry.neighbours < 0)
+    if len(boundary_faces):
+        owners = geometry.owners[boundary_faces]
+        radius = (
+            np.abs(
+                np.sum(
+                    primitive[owners, 1:3]
+                    * geometry.face_normals[boundary_faces],
+                    axis=1,
+                )
+            )
+            + sound_speed[owners]
+        )
+        np.add.at(
+            diagonal,
+            owners,
+            time_step
+            * radius
+            * geometry.face_lengths[boundary_faces]
+            / geometry.areas[owners],
+        )
+    for cell_id, value in enumerate(diagonal):
+        entries[cell_id] = value
+    scalar_matrix = coo_matrix(
+        (entries, (rows, columns)), shape=(cell_count, cell_count)
+    ).tocsc()
+    block_matrix = kron(
+        scalar_matrix, eye(variable_count, format="csc"), format="csc"
+    )
+    dimension = cell_count * variable_count
+    if settings.implicit_preconditioner == "LU-SGS":
+        diagonal_blocks = np.repeat(scalar_matrix.diagonal(), variable_count)
+        lower = tril(block_matrix, format="csr")
+        upper = triu(block_matrix, format="csr")
+        diagonal_blocks = np.maximum(diagonal_blocks, 1e-14)
+
+        def apply_lu_sgs(vector: np.ndarray) -> np.ndarray:
+            forward = spsolve_triangular(lower, vector, lower=True)
+            return spsolve_triangular(
+                upper, diagonal_blocks * forward, lower=False
+            )
+
+        return LinearOperator(
+            (dimension, dimension), matvec=apply_lu_sgs, dtype=float
+        )
+    try:
+        factor = spilu(block_matrix, drop_tol=1e-3, fill_factor=10.0)
+    except RuntimeError as error:
+        raise SolverError(
+            f"Could not factor the first-order ILU preconditioner: {error}"
+        ) from error
+    return LinearOperator(
+        (dimension, dimension),
+        matvec=factor.solve,
+        dtype=float,
+    )
+
+
+def _implicit_euler_step(
+    initial: np.ndarray,
+    time_step: float,
+    geometry: _Geometry,
+    settings: NumericalSettings,
+) -> tuple[np.ndarray, float]:
+    attempted_time_step = time_step
+    last_error: SolverError | None = None
+    for _ in range(12):
+        try:
+            solution = _implicit_euler_solve_once(
+                initial, attempted_time_step, geometry, settings
+            )
+            return solution, attempted_time_step
+        except SolverError as error:
+            last_error = error
+            attempted_time_step *= 0.5
+    raise SolverError(
+        "Implicit Euler could not converge after reducing the time step "
+        f"12 times; last failure: {last_error}"
+    ) from last_error
+
+
+def _implicit_euler_solve_once(
+    initial: np.ndarray,
+    time_step: float,
+    geometry: _Geometry,
+    settings: NumericalSettings,
+) -> np.ndarray:
+    state = _limit_time_state(initial, settings)
+    jacobian_settings = replace(settings, reconstruction="First order")
+    is_regularized = (
+        state.shape[1] == 6
+        and settings.turbulence_omega_formulation == "Regularized k-log-omega"
+    )
+    flow_state, turbulence_state, _ = _unpack_time_state(
+        state,
+        geometry,
+        settings,
+        state.shape[1] > 4,
+        is_regularized,
+    )
+    primitive = _primitive_from_conservative(
+        flow_state, turbulence_state, settings.gamma
+    )
+    rho_scale = max(float(np.max(primitive[:, 0])), 1e-12)
+    speed_scale = max(
+        float(np.max(np.abs(primitive[:, 1:3]))),
+        float(np.max(_sound_speed(primitive, settings.gamma))),
+        1e-12,
+    )
+    scales = np.maximum(np.max(np.abs(state), axis=0), 1e-12)
+    scales[0] = max(scales[0], rho_scale)
+    scales[1:3] = np.maximum(scales[1:3], rho_scale * speed_scale)
+    scales[3] = max(
+        scales[3],
+        rho_scale * speed_scale**2,
+        float(np.max(primitive[:, 3])) / (settings.gamma - 1.0),
+    )
+    if state.shape[1] > 4:
+        scales[4] = max(scales[4], rho_scale * speed_scale**2 * 1e-8)
+        if is_regularized:
+            scales[5] = max(scales[5], 1.0)
+        else:
+            scales[5] = max(scales[5], rho_scale * 1e-8)
+    scale_grid = scales[None, :]
+
+    def evaluate(candidate: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        rate = _time_state_rhs(candidate, geometry, settings)
+        equation = candidate - initial - time_step * rate
+        return rate, equation
+
+    for _ in range(12):
+        rate, equation = evaluate(state)
+        scaled_equation = equation / scale_grid
+        equation_norm = float(np.max(np.abs(scaled_equation)))
+        update_norm = float(np.max(np.abs((state - initial) / scale_grid)))
+        if equation_norm <= 1e-9 * max(1.0, update_norm):
+            return _limit_time_state(state, settings)
+
+        flow_state, turbulence_state, _ = _unpack_time_state(
+            state,
+            geometry,
+            settings,
+            state.shape[1] > 4,
+            is_regularized,
+        )
+        primitive = _primitive_from_conservative(
+            flow_state, turbulence_state, settings.gamma
+        )
+        preconditioner = _implicit_preconditioner(
+            primitive,
+            geometry,
+            jacobian_settings,
+            time_step,
+            state.shape[1],
+        )
+        jacobian_rate = _time_state_rhs(state, geometry, jacobian_settings)
+        operator = _matrix_free_implicit_operator(
+            state,
+            jacobian_rate,
+            scale_grid,
+            time_step,
+            geometry,
+            jacobian_settings,
+        )
+        correction = _solve_gmres(
+            operator,
+            preconditioner,
+            -scaled_equation.ravel(),
+            settings.gmres_tolerance,
+            settings.gmres_max_iterations,
+            settings.gmres_krylov_dimension,
+        )
+
+        accepted = False
+        damping = 1.0
+        for _ in range(8):
+            candidate = _limit_time_state(
+                state + damping * correction.reshape(state.shape) * scale_grid,
+                settings,
+            )
+            try:
+                _, candidate_equation = evaluate(candidate)
+                candidate_norm = float(
+                    np.max(np.abs(candidate_equation / scale_grid))
+                )
+            except (SolverError, ValueError, FloatingPointError):
+                candidate_norm = math.inf
+            if candidate_norm < equation_norm:
+                state = candidate
+                accepted = True
+                break
+            damping *= 0.5
+        if not accepted:
+            raise SolverError(
+                "Implicit Euler Newton iteration could not reduce its residual."
+            )
+    raise SolverError("Implicit Euler Newton iteration did not converge.")
+
+
+def _solve_gmres(
+    operator: LinearOperator,
+    preconditioner: LinearOperator,
+    right_hand_side: np.ndarray,
+    tolerance: float,
+    maximum_iterations: int,
+    krylov_dimension: int,
+) -> np.ndarray:
+    solution = np.zeros_like(right_hand_side)
+    iterations_used = 0
+    while iterations_used < maximum_iterations:
+        cycle_iterations = 0
+
+        def count_iteration(_residual: float) -> None:
+            nonlocal cycle_iterations
+            cycle_iterations += 1
+
+        restart = min(krylov_dimension, maximum_iterations - iterations_used)
+        solution, info = gmres(
+            operator,
+            right_hand_side,
+            x0=solution,
+            M=preconditioner,
+            restart=restart,
+            maxiter=1,
+            rtol=tolerance,
+            atol=0.0,
+            callback=count_iteration,
+            callback_type="pr_norm",
+        )
+        iterations_used += cycle_iterations
+        if info == 0:
+            return solution
+        if info < 0:
+            raise SolverError(f"Implicit Euler GMRES broke down (status {info}).")
+        if cycle_iterations == 0:
+            break
+    raise SolverError(
+        "Implicit Euler GMRES did not converge within "
+        f"{maximum_iterations} iterations (relative tolerance {tolerance:g})."
+    )
+
+
+def _matrix_free_implicit_operator(
+    state: np.ndarray,
+    rate: np.ndarray,
+    scale_grid: np.ndarray,
+    time_step: float,
+    geometry: _Geometry,
+    settings: NumericalSettings,
+) -> LinearOperator:
+    state_shape = state.shape
+    state_dimensionless_norm = float(np.linalg.norm(state / scale_grid))
+    finite_difference_scale = math.sqrt(np.finfo(float).eps)
+
+    def matrix_vector(vector: np.ndarray) -> np.ndarray:
+        direction = vector.reshape(state_shape)
+        direction_norm = float(np.linalg.norm(direction))
+        if direction_norm == 0.0:
+            return vector.copy()
+        epsilon = (
+            finite_difference_scale
+            * max(1.0, state_dimensionless_norm)
+            / direction_norm
+        )
+        perturbed_rate = _time_state_rhs(
+            state + epsilon * scale_grid * direction,
+            geometry,
+            settings,
+        )
+        jacobian_vector = (perturbed_rate - rate) / epsilon
+        return (direction - time_step * jacobian_vector / scale_grid).ravel()
+
+    return LinearOperator(
+        (state.size, state.size), matvec=matrix_vector, dtype=float
+    )
 
 
 def _adaptation_indicator_values(

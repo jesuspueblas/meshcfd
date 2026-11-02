@@ -33,7 +33,14 @@ The current version provides:
 - Default solution-view setup: Density, Rainbow palette, linear scale,
   automatic range, and a visible vertical color legend.
 - Initial numerical controls for MUSCL reconstruction, limiters, fluxes, and
-  time integration.
+  time integration. Explicit Euler, RK2, RK3, and RK4 are available, together
+  with an implicit Euler method that retains the selected spatial
+  reconstruction, using matrix-free GMRES and a first-order Jacobian
+  approximation.
+  GMRES relative tolerance, iteration limit, Krylov dimension, and ILU or
+  LU-SGS preconditioning are configurable (LU-SGS is the default). Implicit
+  Euler accepts CFL values up to 1000 and halves the time step automatically
+  when the nonlinear solve cannot converge.
 - Optional laminar viscous stresses and Fourier heat conduction, using
   constant dynamic viscosity or Sutherland's law and conductivity derived from
   the Prandtl number. Constant body acceleration is configurable in both

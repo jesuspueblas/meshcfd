@@ -37,12 +37,41 @@ class NumericsPanel(QWidget):
         self.limiter_combo = self._combo(LIMITER_SCHEMES)
         self.flux_combo = self._combo(FLUX_SCHEMES)
         self.time_integration_combo = self._combo(TIME_INTEGRATION_SCHEMES)
+        self.time_integration_combo.setToolTip(
+            "Implicit Euler uses a first-order spatial residual for robust "
+            "high-CFL convergence."
+        )
         form.addRow("Reconstruction:", self.reconstruction_combo)
         form.addRow("Limiter:", self.limiter_combo)
         form.addRow("Convective flux:", self.flux_combo)
         form.addRow("Time integration:", self.time_integration_combo)
 
-        self.cfl_spin = self._double_spin(0.001, 1.0, 0.5, 3)
+        self.cfl_spin = self._double_spin(0.001, 1000.0, 0.5, 3)
+        self.cfl_spin.setToolTip(
+            "Explicit methods require CFL <= 1. Implicit Euler supports larger "
+            "CFL values and solves each step with matrix-free GMRES."
+        )
+        self.implicit_preconditioner_combo = self._combo(("LU-SGS", "ILU"))
+        self.gmres_tolerance_spin = self._double_spin(
+            1e-12, 0.999999999999, 1e-6, 12
+        )
+        self.gmres_tolerance_spin.setToolTip(
+            "Relative linear-system convergence tolerance for GMRES."
+        )
+        self.gmres_iterations_spin = QSpinBox(self)
+        self.gmres_iterations_spin.setRange(1, 100000)
+        self.gmres_krylov_dimension_spin = QSpinBox(self)
+        self.gmres_krylov_dimension_spin.setRange(1, 1000)
+        form.addRow("Implicit preconditioner:", self.implicit_preconditioner_combo)
+        form.addRow("GMRES relative tolerance:", self.gmres_tolerance_spin)
+        form.addRow("GMRES maximum iterations:", self.gmres_iterations_spin)
+        form.addRow("GMRES Krylov dimension:", self.gmres_krylov_dimension_spin)
+        self.implicit_controls = (
+            self.implicit_preconditioner_combo,
+            self.gmres_tolerance_spin,
+            self.gmres_iterations_spin,
+            self.gmres_krylov_dimension_spin,
+        )
         self.iterations_spin = QSpinBox(self)
         self.iterations_spin.setRange(1, 10000000)
         self.end_time_spin = self._double_spin(1e-12, 1e12, 1.0, 8)
@@ -186,6 +215,10 @@ class NumericsPanel(QWidget):
             self.flux_combo,
             self.time_integration_combo,
             self.cfl_spin,
+            self.implicit_preconditioner_combo,
+            self.gmres_tolerance_spin,
+            self.gmres_iterations_spin,
+            self.gmres_krylov_dimension_spin,
             self.iterations_spin,
             self.end_time_spin,
             self.residual_spin,
@@ -208,6 +241,12 @@ class NumericsPanel(QWidget):
             self.adaptation_threshold_spin,
             self.adaptation_variable_combo,
         )
+        self.time_integration_combo.currentTextChanged.connect(
+            self._update_cfl_limit
+        )
+        self.time_integration_combo.currentTextChanged.connect(
+            self._update_implicit_controls
+        )
         for combo in (
             self.reconstruction_combo,
             self.limiter_combo,
@@ -217,6 +256,7 @@ class NumericsPanel(QWidget):
             combo.currentTextChanged.connect(self._sync_case)
         for control in (
             self.cfl_spin,
+            self.gmres_tolerance_spin,
             self.iterations_spin,
             self.end_time_spin,
             self.residual_spin,
@@ -231,6 +271,14 @@ class NumericsPanel(QWidget):
             self.acceleration_y_spin,
         ):
             control.valueChanged.connect(self._sync_case)
+        for control in (
+            self.gmres_iterations_spin,
+            self.gmres_krylov_dimension_spin,
+        ):
+            control.valueChanged.connect(self._sync_case)
+        self.implicit_preconditioner_combo.currentTextChanged.connect(
+            self._sync_case
+        )
         self.viscosity_model_combo.currentTextChanged.connect(self._sync_case)
         self.turbulence_model_combo.currentTextChanged.connect(
             self._update_turbulence_controls
@@ -259,6 +307,8 @@ class NumericsPanel(QWidget):
         self._update_viscosity_controls()
         self._update_turbulence_controls()
         self._update_adaptive_controls()
+        self._update_cfl_limit()
+        self._update_implicit_controls()
 
     def _combo(self, values: tuple[str, ...]) -> QComboBox:
         combo = QComboBox(self)
@@ -283,7 +333,16 @@ class NumericsPanel(QWidget):
         self.limiter_combo.setCurrentText(settings.limiter)
         self.flux_combo.setCurrentText(settings.flux)
         self.time_integration_combo.setCurrentText(settings.time_integration)
+        self._update_cfl_limit()
         self.cfl_spin.setValue(settings.cfl)
+        self.implicit_preconditioner_combo.setCurrentText(
+            settings.implicit_preconditioner
+        )
+        self.gmres_tolerance_spin.setValue(settings.gmres_tolerance)
+        self.gmres_iterations_spin.setValue(settings.gmres_max_iterations)
+        self.gmres_krylov_dimension_spin.setValue(
+            settings.gmres_krylov_dimension
+        )
         self.iterations_spin.setValue(settings.max_iterations)
         self.end_time_spin.setValue(settings.end_time)
         self.residual_spin.setValue(settings.residual_tolerance)
@@ -322,6 +381,7 @@ class NumericsPanel(QWidget):
         self._update_viscosity_controls()
         self._update_turbulence_controls()
         self._update_adaptive_controls()
+        self._update_implicit_controls()
 
     def _sync_case(self, *_args) -> None:
         settings = self._case.numerics
@@ -330,6 +390,14 @@ class NumericsPanel(QWidget):
         settings.flux = self.flux_combo.currentText()
         settings.time_integration = self.time_integration_combo.currentText()
         settings.cfl = self.cfl_spin.value()
+        settings.implicit_preconditioner = (
+            self.implicit_preconditioner_combo.currentText()
+        )
+        settings.gmres_tolerance = self.gmres_tolerance_spin.value()
+        settings.gmres_max_iterations = self.gmres_iterations_spin.value()
+        settings.gmres_krylov_dimension = (
+            self.gmres_krylov_dimension_spin.value()
+        )
         settings.max_iterations = self.iterations_spin.value()
         settings.end_time = self.end_time_spin.value()
         settings.residual_tolerance = self.residual_spin.value()
@@ -405,6 +473,22 @@ class NumericsPanel(QWidget):
             self.turbulence_wall_treatment_combo,
             self.turbulence_omega_formulation_combo,
         ):
+            label = self.layout().labelForField(control)
+            if label is not None:
+                label.setVisible(visible)
+
+    def _update_cfl_limit(self, *_args) -> None:
+        maximum = (
+            1000.0
+            if self.time_integration_combo.currentText() == "Implicit Euler"
+            else 1.0
+        )
+        self.cfl_spin.setMaximum(maximum)
+
+    def _update_implicit_controls(self, *_args) -> None:
+        visible = self.time_integration_combo.currentText() == "Implicit Euler"
+        for control in self.implicit_controls:
+            control.setVisible(visible)
             label = self.layout().labelForField(control)
             if label is not None:
                 label.setVisible(visible)

@@ -161,6 +161,10 @@ def case_to_dict(
             "flux": case.numerics.flux,
             "time_integration": case.numerics.time_integration,
             "cfl": case.numerics.cfl,
+            "gmres_tolerance": case.numerics.gmres_tolerance,
+            "gmres_max_iterations": case.numerics.gmres_max_iterations,
+            "gmres_krylov_dimension": case.numerics.gmres_krylov_dimension,
+            "implicit_preconditioner": case.numerics.implicit_preconditioner,
             "max_iterations": case.numerics.max_iterations,
             "end_time": end_time,
             "residual_tolerance": case.numerics.residual_tolerance,
@@ -311,6 +315,25 @@ def case_from_dict(
             "time_integration", defaults.time_integration
         ),
         cfl=_positive_float(raw_numerics.get("cfl", defaults.cfl), "CFL"),
+        gmres_tolerance=_positive_float(
+            raw_numerics.get("gmres_tolerance", defaults.gmres_tolerance),
+            "GMRES tolerance",
+        ),
+        gmres_max_iterations=_positive_integer(
+            raw_numerics.get(
+                "gmres_max_iterations", defaults.gmres_max_iterations
+            ),
+            "Maximum GMRES iterations",
+        ),
+        gmres_krylov_dimension=_positive_integer(
+            raw_numerics.get(
+                "gmres_krylov_dimension", defaults.gmres_krylov_dimension
+            ),
+            "GMRES Krylov dimension",
+        ),
+        implicit_preconditioner=raw_numerics.get(
+            "implicit_preconditioner", defaults.implicit_preconditioner
+        ),
         max_iterations=_positive_integer(
             raw_numerics.get("max_iterations", defaults.max_iterations),
             "Maximum iterations",
@@ -409,6 +432,7 @@ def case_from_dict(
         ("limiter", LIMITER_SCHEMES),
         ("flux", FLUX_SCHEMES),
         ("time_integration", TIME_INTEGRATION_SCHEMES),
+        ("implicit_preconditioner", ("ILU", "LU-SGS")),
         ("viscosity_model", ("Inviscid", "Constant", "Sutherland")),
         ("turbulence_model", ("None", "Menter k-omega SST")),
         ("turbulence_wall_treatment", ("Wall-resolved", "Wall functions")),

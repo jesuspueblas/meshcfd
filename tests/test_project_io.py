@@ -391,6 +391,27 @@ def test_adaptive_mesh_settings_and_hierarchy_round_trip(tmp_path):
     assert restored.numerics.adaptation_variable == "Pressure"
 
 
+def test_implicit_euler_and_large_cfl_round_trip(tmp_path):
+    case = Case(name="implicit")
+    case.numerics.time_integration = "Implicit Euler"
+    case.numerics.cfl = 25.0
+    case.numerics.gmres_tolerance = 1e-8
+    case.numerics.gmres_max_iterations = 500
+    case.numerics.gmres_krylov_dimension = 40
+    case.numerics.implicit_preconditioner = "LU-SGS"
+    path = tmp_path / "implicit.mcf.json"
+
+    save_case(path, case)
+    restored = load_case(path)
+
+    assert restored.numerics.time_integration == "Implicit Euler"
+    assert restored.numerics.cfl == pytest.approx(25.0)
+    assert restored.numerics.gmres_tolerance == pytest.approx(1e-8)
+    assert restored.numerics.gmres_max_iterations == 500
+    assert restored.numerics.gmres_krylov_dimension == 40
+    assert restored.numerics.implicit_preconditioner == "LU-SGS"
+
+
 def test_regularized_sst_formulation_requires_wall_resolved_treatment():
     case = Case()
     case.numerics.turbulence_model = "Menter k-omega SST"

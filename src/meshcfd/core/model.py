@@ -20,7 +20,13 @@ BOUNDARY_TYPES = (
 RECONSTRUCTION_SCHEMES = ("First order", "MUSCL linear", "MUSCL parabolic")
 LIMITER_SCHEMES = ("Barth-Jespersen", "Venkatakrishnan", "Minmod", "Van Leer")
 FLUX_SCHEMES = ("HLLC", "Roe", "Rusanov")
-TIME_INTEGRATION_SCHEMES = ("Explicit Euler", "Explicit RK2", "Explicit RK3")
+TIME_INTEGRATION_SCHEMES = (
+    "Explicit Euler",
+    "Explicit RK2",
+    "Explicit RK3",
+    "Explicit RK4",
+    "Implicit Euler",
+)
 
 
 @dataclass
@@ -79,6 +85,10 @@ class NumericalSettings:
     flux: str = "HLLC"
     time_integration: str = "Explicit RK2"
     cfl: float = 0.5
+    gmres_tolerance: float = 1e-6
+    gmres_max_iterations: int = 300
+    gmres_krylov_dimension: int = 30
+    implicit_preconditioner: str = "LU-SGS"
     max_iterations: int = 1000
     end_time: float = 1.0
     residual_tolerance: float = 1e-6

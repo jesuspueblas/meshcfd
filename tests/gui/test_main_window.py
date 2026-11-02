@@ -85,6 +85,30 @@ def test_main_window_initial_state(qtbot):
         assert dock.allowedAreas() == Qt.AllDockWidgetAreas
 
 
+def test_implicit_integrator_enables_large_cfl_only_for_implicit(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    panel = window.numerics_panel
+
+    panel.time_integration_combo.setCurrentText("Implicit Euler")
+    panel.cfl_spin.setValue(25.0)
+    panel.gmres_tolerance_spin.setValue(1e-8)
+    panel.gmres_iterations_spin.setValue(500)
+    panel.gmres_krylov_dimension_spin.setValue(40)
+    panel.implicit_preconditioner_combo.setCurrentText("LU-SGS")
+    assert panel.cfl_spin.maximum() == 1000.0
+    assert window.case.numerics.cfl == pytest.approx(25.0)
+    assert window.case.numerics.gmres_tolerance == pytest.approx(1e-8)
+    assert window.case.numerics.gmres_max_iterations == 500
+    assert window.case.numerics.gmres_krylov_dimension == 40
+    assert window.case.numerics.implicit_preconditioner == "LU-SGS"
+
+    panel.time_integration_combo.setCurrentText("Explicit RK4")
+    assert panel.cfl_spin.maximum() == 1.0
+    assert panel.cfl_spin.value() == 1.0
+    assert window.case.numerics.cfl == pytest.approx(1.0)
+
+
 def test_adaptive_mesh_controls_update_numerical_settings(qtbot):
     window = MainWindow()
     qtbot.addWidget(window)

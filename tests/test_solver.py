@@ -23,6 +23,7 @@ from meshcfd.core.solver import (
     _build_geometry,
     _dynamic_viscosity,
     _far_field_boundary_states,
+    _implicit_euler_step,
     _mass_flow_inlet_boundary_states,
     _mass_flow_outlet_boundary_states,
     _parabolic_reconstruction,
@@ -542,7 +543,8 @@ def test_viscous_wall_slip_and_no_slip_are_distinct():
 
 @pytest.mark.parametrize("flux", ("Rusanov", "HLLC", "Roe"))
 @pytest.mark.parametrize(
-    "integrator", ("Explicit Euler", "Explicit RK2", "Explicit RK3")
+    "integrator",
+    ("Explicit Euler", "Explicit RK2", "Explicit RK3", "Explicit RK4"),
 )
 def test_uniform_periodic_flow_is_preserved(flux, integrator):
     case = make_periodic_case()
@@ -573,7 +575,8 @@ def test_uniform_periodic_flow_is_preserved(flux, integrator):
 
 @pytest.mark.parametrize("flux", ("Rusanov", "HLLC", "Roe"))
 @pytest.mark.parametrize(
-    "integrator", ("Explicit Euler", "Explicit RK2", "Explicit RK3")
+    "integrator",
+    ("Explicit Euler", "Explicit RK2", "Explicit RK3", "Explicit RK4"),
 )
 @pytest.mark.parametrize(
     "reconstruction", ("First order", "MUSCL linear", "MUSCL parabolic")
@@ -628,6 +631,86 @@ def test_periodic_solver_conserves_integrated_euler_state(
         rtol=1e-11,
         atol=1e-11,
     )
+
+
+@pytest.mark.parametrize("preconditioner", ("ILU", "LU-SGS"))
+def test_implicit_euler_gmres_advances_above_explicit_cfl_and_conserves_flow(
+    preconditioner,
+):
+    case = make_periodic_case(3, 2)
+    case.numerics.flux = "Rusanov"
+    case.numerics.time_integration = "Implicit Euler"
+    case.numerics.cfl = 100.0
+    case.numerics.implicit_preconditioner = preconditioner
+    case.numerics.end_time = 0.005
+    initial = tuple(
+        InitialState(
+            density=1.0 + 0.03 * math.sin(2 * math.pi * (i + 0.5) / 3),
+            velocity_x=0.2,
+            velocity_y=-0.1,
+            pressure=1.0 + 0.02 * math.cos(2 * math.pi * (j + 0.5) / 2),
+        )
+        for j in range(2)
+        for i in range(3)
+    )
+    initial_conservative = primitive_to_conservative(
+        np.array(
+            [
+                (state.density, state.velocity_x, state.velocity_y, state.pressure)
+                for state in initial
+            ]
+        ),
+        case.numerics.gamma,
+    )
+
+    result = solve_case(case, initial)
+
+    final_conservative = primitive_to_conservative(
+        np.array(
+            [
+                (state.density, state.velocity_x, state.velocity_y, state.pressure)
+                for state in result.states
+            ]
+        ),
+        case.numerics.gamma,
+    )
+    assert result.completed
+    assert result.time == case.numerics.end_time
+    assert all(state.density > 0.0 and state.pressure > 0.0 for state in result.states)
+    np.testing.assert_allclose(
+        final_conservative.sum(axis=0),
+        initial_conservative.sum(axis=0),
+        rtol=1e-10,
+        atol=1e-10,
+    )
+
+
+def test_implicit_euler_halves_time_step_until_nonlinear_solve_converges(
+    monkeypatch,
+):
+    case = make_periodic_case()
+    geometry = _build_geometry(case.mesh, case)
+    state = primitive_to_conservative(
+        np.array(((1.0, 0.2, -0.1, 1.0),)), case.numerics.gamma
+    )
+    attempted_time_steps = []
+
+    def solve_once(initial, time_step, _geometry, _settings):
+        attempted_time_steps.append(time_step)
+        if len(attempted_time_steps) < 3:
+            raise SolverError("nonlinear solve did not converge")
+        return initial
+
+    monkeypatch.setattr(
+        "meshcfd.core.solver._implicit_euler_solve_once", solve_once
+    )
+    solution, accepted_time_step = _implicit_euler_step(
+        state, 0.8, geometry, case.numerics
+    )
+
+    assert attempted_time_steps == pytest.approx((0.8, 0.4, 0.2))
+    assert accepted_time_step == pytest.approx(0.2)
+    np.testing.assert_array_equal(solution, state)
 
 
 def test_parabolic_reconstruction_recovers_quadratic_field():
@@ -1189,10 +1272,13 @@ def test_isentropic_euler_vortex_runs_for_one_period(reconstruction):
     ),
     (
         ("Wall-resolved", "Standard SST", "Explicit RK2", "Constant"),
+        ("Wall-resolved", "Standard SST", "Implicit Euler", "Constant"),
         ("Wall functions", "Standard SST", "Explicit RK2", "Constant"),
         ("Wall-resolved", "Regularized k-log-omega", "Explicit Euler", "Constant"),
         ("Wall-resolved", "Regularized k-log-omega", "Explicit RK2", "Constant"),
         ("Wall-resolved", "Regularized k-log-omega", "Explicit RK3", "Constant"),
+        ("Wall-resolved", "Regularized k-log-omega", "Explicit RK4", "Constant"),
+        ("Wall-resolved", "Regularized k-log-omega", "Implicit Euler", "Constant"),
         ("Wall-resolved", "Regularized k-log-omega", "Explicit RK2", "Sutherland"),
     ),
 )
