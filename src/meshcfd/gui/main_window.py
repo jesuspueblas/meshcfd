@@ -198,6 +198,7 @@ class MainWindow(QMainWindow):
         self._create_actions()
         self._create_toolbar()
         self._create_menus()
+        self._update_visualization()
         self._update_title()
         self._log_output("MeshCFD ready.")
 

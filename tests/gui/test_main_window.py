@@ -54,6 +54,18 @@ def test_main_window_initial_state(qtbot):
     assert window.action_run.text() == "Run Solver"
     assert window.action_stop.text() == "Stop Solver"
     assert not window.action_stop.isEnabled()
+    panel = window.visualization_panel
+    assert panel.variable_combo.currentText() == "Density"
+    assert panel.palette_combo.currentText() == "Rainbow"
+    assert panel.scale_combo.currentText() == "Linear"
+    assert panel.auto_range_checkbox.isChecked()
+    assert panel.show_colorbar_checkbox.isChecked()
+    assert panel.orientation_combo.currentText() == "Vertical"
+    assert panel.orientation_combo.isEnabled()
+    assert window.canvas.color_map == "Rainbow"
+    assert window.canvas.color_scale == "Linear"
+    assert window.canvas.show_colorbar
+    assert window.canvas.color_bar_overlay.orientation == "Vertical"
 
 
 def test_run_pauses_and_stop_preserves_state_for_updated_settings(qtbot, monkeypatch):

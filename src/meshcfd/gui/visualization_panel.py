@@ -131,6 +131,7 @@ class VisualizationPanel(QWidget):
             "cell centers adjacent to no-slip walls."
         )
         self.palette_combo = self._combo(COLOR_MAPS, 105)
+        self.palette_combo.setCurrentText("Rainbow")
         self.scale_combo = self._combo(("Linear", "Logarithmic"), 94)
         self._add_labeled_widget(layout, "Field", self.variable_combo)
         self._add_labeled_widget(layout, "Palette", self.palette_combo)
@@ -157,12 +158,13 @@ class VisualizationPanel(QWidget):
         self._add_separator(layout)
 
         self.show_colorbar_checkbox = self._icon_toggle(
-            "colorbar", "Show color bar in plot"
+            "colorbar", "Show color bar in plot", checked=True
         )
         layout.addWidget(self.show_colorbar_checkbox)
         self.orientation_combo = self._combo(("Horizontal", "Vertical"), 94)
+        self.orientation_combo.setCurrentText("Vertical")
         self.orientation_combo.setToolTip("Color bar orientation")
-        self.orientation_combo.setEnabled(False)
+        self.orientation_combo.setEnabled(self.show_colorbar_checkbox.isChecked())
         layout.addWidget(self.orientation_combo)
         layout.addStretch(1)
 

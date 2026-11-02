@@ -605,7 +605,7 @@ class MeshCanvas(QGraphicsView):
             colorbar_orientation,
             colorbar_variable,
         )
-        self.color_bar_overlay.setVisible(show_colorbar)
+        self.color_bar_overlay.setVisible(show_colorbar and bool(values))
         self._draw_mesh()
         self.viewport().update()
         return values if colors else ()

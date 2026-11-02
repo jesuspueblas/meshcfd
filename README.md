@@ -25,6 +25,8 @@ The current version provides:
   clamping outside the selected range, and optional smooth coloring.
 - Visualization of Mach number, total (stagnation) pressure, temperature and
   density, plus y+ at the first cell centers adjacent to no-slip walls.
+- Default solution-view setup: Density, Rainbow palette, linear scale,
+  automatic range, and a visible vertical color legend.
 - Initial numerical controls for MUSCL reconstruction, limiters, fluxes, and
   time integration.
 - Optional laminar viscous stresses and Fourier heat conduction, using
