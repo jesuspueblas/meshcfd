@@ -28,7 +28,7 @@ from meshcfd.core.periodic import detect_periodic_pair
 from meshcfd.io.mesh_io import load_mesh, mesh_from_dict, mesh_to_dict
 
 PROJECT_FORMAT = "meshcfd-case"
-PROJECT_VERSION = 9
+PROJECT_VERSION = 10
 
 
 def case_to_dict(
@@ -47,6 +47,20 @@ def case_to_dict(
         "Wall functions",
     ):
         raise ValueError("Unsupported turbulence wall treatment.")
+    if case.numerics.turbulence_omega_formulation not in (
+        "Standard SST",
+        "Regularized k-log-omega",
+    ):
+        raise ValueError("Unsupported SST omega formulation.")
+    if (
+        case.numerics.turbulence_model == "Menter k-omega SST"
+        and case.numerics.turbulence_omega_formulation
+        == "Regularized k-log-omega"
+        and case.numerics.turbulence_wall_treatment != "Wall-resolved"
+    ):
+        raise ValueError(
+            "The regularized k-log-omega formulation requires wall-resolved treatment."
+        )
     _positive_float(case.numerics.prandtl_number, "Prandtl number")
     _positive_float(case.numerics.dynamic_viscosity, "Dynamic viscosity")
     _positive_float(
@@ -145,6 +159,9 @@ def case_to_dict(
             "turbulence_wall_treatment": (
                 case.numerics.turbulence_wall_treatment
             ),
+            "turbulence_omega_formulation": (
+                case.numerics.turbulence_omega_formulation
+            ),
         },
         "initial_conditions": initial_conditions,
         "final_solution": final_solution,
@@ -166,6 +183,7 @@ def case_from_dict(
         6,
         7,
         8,
+        9,
         PROJECT_VERSION,
     ):
         raise ValueError(
@@ -325,6 +343,10 @@ def case_from_dict(
         turbulence_wall_treatment=raw_numerics.get(
             "turbulence_wall_treatment", defaults.turbulence_wall_treatment
         ),
+        turbulence_omega_formulation=raw_numerics.get(
+            "turbulence_omega_formulation",
+            defaults.turbulence_omega_formulation,
+        ),
     )
     for key, choices in (
         ("reconstruction", RECONSTRUCTION_SCHEMES),
@@ -334,11 +356,24 @@ def case_from_dict(
         ("viscosity_model", ("Inviscid", "Constant", "Sutherland")),
         ("turbulence_model", ("None", "Menter k-omega SST")),
         ("turbulence_wall_treatment", ("Wall-resolved", "Wall functions")),
+        (
+            "turbulence_omega_formulation",
+            ("Standard SST", "Regularized k-log-omega"),
+        ),
     ):
         if getattr(settings, key) not in choices:
             raise ValueError(f"Unsupported numerical setting for {key}.")
     if settings.gamma <= 1.0:
         raise ValueError("Gamma must be greater than 1.")
+    if (
+        settings.turbulence_model == "Menter k-omega SST"
+        and settings.turbulence_omega_formulation
+        == "Regularized k-log-omega"
+        and settings.turbulence_wall_treatment != "Wall-resolved"
+    ):
+        raise ValueError(
+            "The regularized k-log-omega formulation requires wall-resolved treatment."
+        )
 
     initial_conditions = _initial_conditions_from_dict(
         data.get("initial_conditions", {})

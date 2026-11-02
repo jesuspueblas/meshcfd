@@ -83,6 +83,7 @@ class NumericalSettings:
     acceleration_y: float = 0.0
     turbulence_model: str = "None"
     turbulence_wall_treatment: str = "Wall-resolved"
+    turbulence_omega_formulation: str = "Standard SST"
 
 
 @dataclass

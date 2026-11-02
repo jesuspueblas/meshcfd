@@ -27,8 +27,14 @@ from meshcfd.core.solver import (
     _mass_flow_outlet_boundary_states,
     _parabolic_reconstruction,
     _pressure_inlet_boundary_states,
+    _primitive_from_conservative,
     _residual,
     _sst_fields,
+    _sst_omega_wall_scale,
+    _sst_regularized_rate,
+    _sst_regularized_turbulence,
+    _sst_regularized_variable,
+    _sst_wall_values,
     _turbulence_boundary_values,
     _viscous_flux,
     derive_solution_fields,
@@ -198,6 +204,107 @@ def test_sst_closure_returns_finite_turbulent_viscosity():
     assert fields[0][0] == pytest.approx(0.001)
     assert np.isfinite(fields[0]).all()
     assert np.all(fields[0] >= 0.0)
+
+
+def test_regularized_sst_variable_uses_article_wall_asymptote():
+    case = make_periodic_case()
+    case.numerics.viscosity_model = "Constant"
+    case.numerics.dynamic_viscosity = 1e-3
+    case.numerics.turbulence_model = "Menter k-omega SST"
+    case.numerics.turbulence_omega_formulation = "Regularized k-log-omega"
+    geometry = _build_geometry(case.mesh, case)
+    primitive = np.array(((1.0, 0.0, 0.0, 1.0),))
+    omega = np.array((12.0,))
+    variable = _sst_regularized_variable(
+        primitive, omega, geometry, case.numerics
+    )
+
+    restored = _sst_regularized_turbulence(
+        primitive, np.array((0.025,)), variable, geometry, case.numerics
+    )
+
+    assert variable[0] == pytest.approx(
+        math.log(12.0 / (6.0e-3 / 0.09))
+    )
+    assert restored[0, 0] == pytest.approx(0.025)
+    assert restored[0, 1] == pytest.approx(12.0)
+
+
+def test_regularized_sst_rate_tracks_sutherland_wall_scale():
+    settings = Case().numerics
+    settings.viscosity_model = "Sutherland"
+    settings.turbulence_model = "Menter k-omega SST"
+    settings.turbulence_omega_formulation = "Regularized k-log-omega"
+    settings.gas_constant = 287.05
+    primitive = np.array(((1.2, 10.0, 2.0, 101325.0),))
+    turbulence = np.array(((0.03, 12.0),))
+    conservative = primitive_to_conservative(primitive, settings.gamma)
+    conservative[:, 3] += turbulence[:, 0]
+    flow_rate = np.array(((0.2, 0.4, -0.3, 10000.0),))
+    turbulence_rate = np.array(((0.005, -0.1),))
+    rate = _sst_regularized_rate(
+        primitive,
+        flow_rate,
+        turbulence,
+        turbulence_rate,
+        settings,
+    )
+
+    time_step = 1e-6
+    advanced_conservative = conservative + time_step * flow_rate
+    advanced_turbulence = turbulence + time_step * turbulence_rate
+    advanced_primitive = _primitive_from_conservative(
+        advanced_conservative, advanced_turbulence, settings.gamma
+    )
+    initial_variable = (
+        np.log(turbulence[0, 1] / primitive[0, 0])
+        - np.log(
+            _sst_omega_wall_scale(
+                primitive, np.array((0.1,)), settings
+            )[0]
+        )
+    )
+    advanced_variable = (
+        np.log(advanced_turbulence[0, 1] / advanced_primitive[0, 0])
+        - np.log(
+            _sst_omega_wall_scale(
+                advanced_primitive, np.array((0.1,)), settings
+            )[0]
+        )
+    )
+
+    assert rate[0] == pytest.approx(
+        (advanced_variable - initial_variable) / time_step,
+        rel=2e-5,
+    )
+
+
+def test_regularized_sst_wall_condition_matches_zero_log_variable():
+    case = make_periodic_case()
+    case.periodic_pairs.clear()
+    for boundary in case.boundary_conditions:
+        boundary.kind = "Wall"
+        boundary.mechanical_condition = "No-slip"
+    case.numerics.viscosity_model = "Constant"
+    case.numerics.dynamic_viscosity = 1e-3
+    case.numerics.turbulence_model = "Menter k-omega SST"
+    case.numerics.turbulence_omega_formulation = "Regularized k-log-omega"
+    geometry = _build_geometry(case.mesh, case)
+    primitive = np.array(((1.0, 0.0, 0.0, 1.0),))
+    turbulence = np.array(((0.01, 10.0),))
+
+    wall_values = _sst_wall_values(
+        primitive, turbulence, geometry, case.numerics
+    )
+    fields = _sst_fields(primitive, turbulence, geometry, case.numerics)
+
+    assert wall_values
+    assert all(value[0] == 0.0 for value in wall_values.values())
+    assert all(
+        value[1] == pytest.approx(6.0e-3 / (0.09 * 0.25))
+        for value in wall_values.values()
+    )
+    assert all(np.isfinite(field).all() for field in fields)
 
 
 def test_sst_inlet_values_come_from_intensity_and_length_scale():
@@ -1004,8 +1111,25 @@ def test_isentropic_euler_vortex_runs_for_one_period(reconstruction):
     assert relative_density_error < 0.2
 
 
-@pytest.mark.parametrize("wall_treatment", ("Wall-resolved", "Wall functions"))
-def test_sst_solver_advances_with_both_wall_treatments(wall_treatment):
+@pytest.mark.parametrize(
+    (
+        "wall_treatment",
+        "omega_formulation",
+        "time_integration",
+        "viscosity_model",
+    ),
+    (
+        ("Wall-resolved", "Standard SST", "Explicit RK2", "Constant"),
+        ("Wall functions", "Standard SST", "Explicit RK2", "Constant"),
+        ("Wall-resolved", "Regularized k-log-omega", "Explicit Euler", "Constant"),
+        ("Wall-resolved", "Regularized k-log-omega", "Explicit RK2", "Constant"),
+        ("Wall-resolved", "Regularized k-log-omega", "Explicit RK3", "Constant"),
+        ("Wall-resolved", "Regularized k-log-omega", "Explicit RK2", "Sutherland"),
+    ),
+)
+def test_sst_solver_advances_with_supported_wall_formulations(
+    wall_treatment, omega_formulation, time_integration, viscosity_model
+):
     case = make_periodic_case(2, 2)
     case.periodic_pairs.clear()
     for boundary in case.boundary_conditions:
@@ -1025,12 +1149,14 @@ def test_sst_solver_advances_with_both_wall_treatments(wall_treatment):
     outlet = case.boundary_conditions[1]
     outlet.kind = "Pressure Outlet"
     outlet.values = {"pressure": 1.0}
-    case.numerics.viscosity_model = "Constant"
+    case.numerics.viscosity_model = viscosity_model
     case.numerics.dynamic_viscosity = 1e-3
     case.numerics.gas_constant = 1.0
     case.numerics.reconstruction = "First order"
     case.numerics.turbulence_model = "Menter k-omega SST"
     case.numerics.turbulence_wall_treatment = wall_treatment
+    case.numerics.turbulence_omega_formulation = omega_formulation
+    case.numerics.time_integration = time_integration
     case.numerics.end_time = 1e-5
     case.numerics.max_iterations = 2
 

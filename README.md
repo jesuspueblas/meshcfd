@@ -115,8 +115,13 @@ specify turbulence intensity in percent and a turbulence length scale in
 metres; the solver derives `k` and `omega` from those values and the boundary
 flow speed. No-slip walls support either wall-resolved SST (use a mesh that
 resolves the viscous near-wall region) or equilibrium logarithmic wall
-functions. The model includes turbulent stress and heat transport in the
-momentum and energy equations; turbulent Prandtl number is fixed at 0.9.
+functions. The SST omega formulation defaults to Standard SST. The optional
+Regularized k-log-omega formulation is available with wall-resolved treatment:
+it evolves `log(omega/omega_wall)`, sets that variable to zero at the wall, and
+uses `omega_wall = 6 mu / (rho beta* y_w^2)` with `beta* = 0.09`, following the
+attached regularization. It is not available with wall functions. The model
+includes turbulent stress and heat transport in the momentum and energy
+equations; turbulent Prandtl number is fixed at 0.9.
 
 The solution viewer also offers Mach number and isentropic stagnation
 properties (total pressure, temperature, and density), computed from the local

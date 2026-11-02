@@ -77,6 +77,9 @@ class NumericsPanel(QWidget):
         self.turbulence_wall_treatment_combo = self._combo(
             ("Wall-resolved", "Wall functions")
         )
+        self.turbulence_omega_formulation_combo = self._combo(
+            ("Standard SST", "Regularized k-log-omega")
+        )
         self.viscosity_model_combo.setToolTip(
             "Inviscid disables molecular diffusion. Sutherland uses air reference "
             "values and temperature in kelvin."
@@ -102,6 +105,10 @@ class NumericsPanel(QWidget):
             "Wall-resolved uses k=0 and the SST near-wall omega condition. "
             "Wall functions use an equilibrium logarithmic law."
         )
+        self.turbulence_omega_formulation_combo.setToolTip(
+            "The regularized formulation evolves log(omega/omega_wall) and "
+            "requires wall-resolved treatment."
+        )
         form.addRow("CFL number:", self.cfl_spin)
         form.addRow("Maximum time steps:", self.iterations_spin)
         form.addRow("End time:", self.end_time_spin)
@@ -118,6 +125,9 @@ class NumericsPanel(QWidget):
         form.addRow("Accel. Y (m/s^2):", self.acceleration_y_spin)
         form.addRow("Turbulence model:", self.turbulence_model_combo)
         form.addRow("SST wall treatment:", self.turbulence_wall_treatment_combo)
+        form.addRow(
+            "SST omega formulation:", self.turbulence_omega_formulation_combo
+        )
 
         self.live_solution_checkbox = QCheckBox("Update during run", self)
         self.live_solution_checkbox.setToolTip(
@@ -154,6 +164,7 @@ class NumericsPanel(QWidget):
             self.acceleration_y_spin,
             self.turbulence_model_combo,
             self.turbulence_wall_treatment_combo,
+            self.turbulence_omega_formulation_combo,
         )
         for combo in (
             self.reconstruction_combo,
@@ -184,6 +195,13 @@ class NumericsPanel(QWidget):
         )
         self.turbulence_model_combo.currentTextChanged.connect(self._sync_case)
         self.turbulence_wall_treatment_combo.currentTextChanged.connect(
+            self._update_turbulence_controls
+        )
+        self.turbulence_wall_treatment_combo.currentTextChanged.connect(self._sync_case)
+        self.turbulence_omega_formulation_combo.currentTextChanged.connect(
+            self._update_turbulence_controls
+        )
+        self.turbulence_omega_formulation_combo.currentTextChanged.connect(
             self._sync_case
         )
         self.set_case(self._case)
@@ -235,9 +253,13 @@ class NumericsPanel(QWidget):
         self.turbulence_wall_treatment_combo.setCurrentText(
             settings.turbulence_wall_treatment
         )
+        self.turbulence_omega_formulation_combo.setCurrentText(
+            settings.turbulence_omega_formulation
+        )
         for control in self._controls:
             control.blockSignals(False)
         self._update_viscosity_controls()
+        self._update_turbulence_controls()
 
     def _sync_case(self, *_args) -> None:
         settings = self._case.numerics
@@ -267,6 +289,9 @@ class NumericsPanel(QWidget):
         settings.turbulence_wall_treatment = (
             self.turbulence_wall_treatment_combo.currentText()
         )
+        settings.turbulence_omega_formulation = (
+            self.turbulence_omega_formulation_combo.currentText()
+        )
         self.changed.emit()
 
     def _update_viscosity_controls(self, *_args) -> None:
@@ -285,6 +310,24 @@ class NumericsPanel(QWidget):
     def _update_turbulence_controls(self, *_args) -> None:
         visible = self.turbulence_model_combo.currentText() != "None"
         self.turbulence_wall_treatment_combo.setVisible(visible)
-        label = self.layout().labelForField(self.turbulence_wall_treatment_combo)
-        if label is not None:
-            label.setVisible(visible)
+        self.turbulence_omega_formulation_combo.setVisible(visible)
+        regularized = (
+            self.turbulence_omega_formulation_combo.currentText()
+            == "Regularized k-log-omega"
+        )
+        resolved_wall = (
+            self.turbulence_wall_treatment_combo.currentText() == "Wall-resolved"
+        )
+        self.turbulence_omega_formulation_combo.setEnabled(
+            not visible or resolved_wall or regularized
+        )
+        self.turbulence_wall_treatment_combo.setEnabled(
+            not visible or not regularized
+        )
+        for control in (
+            self.turbulence_wall_treatment_combo,
+            self.turbulence_omega_formulation_combo,
+        ):
+            label = self.layout().labelForField(control)
+            if label is not None:
+                label.setVisible(visible)

@@ -62,6 +62,7 @@ def test_case_round_trip_keeps_mesh_and_setup(tmp_path):
     case.numerics.acceleration_y = -9.81
     case.numerics.turbulence_model = "Menter k-omega SST"
     case.numerics.turbulence_wall_treatment = "Wall functions"
+    case.numerics.turbulence_omega_formulation = "Standard SST"
     case.initial_conditions.base_state.turbulence_k = 0.025
     case.initial_conditions.base_state.turbulence_omega = 12.0
     case.boundary_conditions[1].values.update(
@@ -86,6 +87,7 @@ def test_case_round_trip_keeps_mesh_and_setup(tmp_path):
     assert restored.numerics.acceleration_y == -9.81
     assert restored.numerics.turbulence_model == "Menter k-omega SST"
     assert restored.numerics.turbulence_wall_treatment == "Wall functions"
+    assert restored.numerics.turbulence_omega_formulation == "Standard SST"
     assert restored.initial_conditions.base_state.turbulence_k == 0.025
     assert restored.initial_conditions.base_state.turbulence_omega == 12.0
     assert restored.boundary_conditions[1].values["turbulence_intensity"] == 2.5
@@ -119,6 +121,16 @@ def test_version_six_case_loads_with_inviscid_defaults():
     assert restored.numerics.prandtl_number == pytest.approx(0.72)
     assert restored.numerics.acceleration_x == 0.0
     assert restored.boundary_conditions == []
+
+
+def test_version_nine_case_defaults_to_standard_sst_omega():
+    data = case_to_dict(Case(name="legacy"))
+    data["version"] = 9
+    data["numerics"].pop("turbulence_omega_formulation")
+
+    restored = case_from_dict(data)
+
+    assert restored.numerics.turbulence_omega_formulation == "Standard SST"
 
 
 def test_version_seven_wall_defaults_to_no_slip():
@@ -213,7 +225,7 @@ def test_case_saves_relative_mesh_reference_and_reloads_mesh(tmp_path):
     save_case(case_path, case)
 
     saved_data = json.loads(case_path.read_text(encoding="utf-8"))
-    assert saved_data["version"] == 9
+    assert saved_data["version"] == 10
     assert saved_data["mesh"] == "../mesh.json"
     assert isinstance(saved_data["mesh"], str)
 
@@ -254,7 +266,7 @@ def test_case_round_trip_preserves_final_solution(tmp_path):
     saved_data = json.loads(path.read_text(encoding="utf-8"))
     restored = load_case(path)
 
-    assert saved_data["version"] == 9
+    assert saved_data["version"] == 10
     assert saved_data["final_solution"] == [
         {
             "density": 0.9,
@@ -334,7 +346,32 @@ def test_periodic_pair_detection_and_case_round_trip(tmp_path):
     assert restored.periodic_pairs == case.periodic_pairs
     assert restored.boundary_conditions[1].kind == "Periodic"
     assert restored.boundary_conditions[3].kind == "Periodic"
-    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 9
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 10
+
+
+def test_regularized_sst_formulation_round_trips(tmp_path):
+    case = Case(name="regularized")
+    case.numerics.turbulence_model = "Menter k-omega SST"
+    case.numerics.turbulence_omega_formulation = "Regularized k-log-omega"
+    path = tmp_path / "regularized.mcf.json"
+
+    save_case(path, case)
+    restored = load_case(path)
+
+    assert restored.numerics.turbulence_omega_formulation == (
+        "Regularized k-log-omega"
+    )
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 10
+
+
+def test_regularized_sst_formulation_requires_wall_resolved_treatment():
+    case = Case()
+    case.numerics.turbulence_model = "Menter k-omega SST"
+    case.numerics.turbulence_wall_treatment = "Wall functions"
+    case.numerics.turbulence_omega_formulation = "Regularized k-log-omega"
+
+    with pytest.raises(ValueError, match="requires wall-resolved treatment"):
+        case_to_dict(case)
 
 
 def test_version_four_periodic_case_defaults_end_time():

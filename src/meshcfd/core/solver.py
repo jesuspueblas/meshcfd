@@ -212,6 +212,20 @@ def solve_case(
         "Wall functions",
     ):
         raise SolverError("Unsupported turbulence wall treatment.")
+    if settings.turbulence_omega_formulation not in (
+        "Standard SST",
+        "Regularized k-log-omega",
+    ):
+        raise SolverError("Unsupported SST omega formulation.")
+    if (
+        settings.turbulence_model == "Menter k-omega SST"
+        and settings.turbulence_omega_formulation
+        == "Regularized k-log-omega"
+        and settings.turbulence_wall_treatment != "Wall-resolved"
+    ):
+        raise SolverError(
+            "The regularized k-log-omega formulation requires wall-resolved treatment."
+        )
     if (
         settings.turbulence_model == "Menter k-omega SST"
         and settings.viscosity_model == "Inviscid"
@@ -255,6 +269,7 @@ def solve_case(
     try:
         conservative = primitive_to_conservative(primitive, settings.gamma)
         turbulence_conservative = None
+        regularized_omega = None
         if settings.turbulence_model == "Menter k-omega SST":
             turbulence_primitive = np.asarray(
                 [
@@ -273,6 +288,17 @@ def solve_case(
                 )
             turbulence_conservative = primitive[:, :1] * turbulence_primitive
             conservative[:, 3] += turbulence_conservative[:, 0]
+            if settings.turbulence_omega_formulation == "Regularized k-log-omega":
+                regularized_omega = _sst_regularized_variable(
+                    primitive, turbulence_primitive[:, 1], geometry, settings
+                )
+                turbulence_conservative = _sst_regularized_turbulence(
+                    primitive,
+                    turbulence_conservative[:, 0],
+                    regularized_omega,
+                    geometry,
+                    settings,
+                )
         _primitive_from_conservative(
             conservative, turbulence_conservative, settings.gamma
         )
@@ -307,6 +333,7 @@ def solve_case(
                 start, geometry, settings, start_turbulence
             )
             turbulence_component_residuals: tuple[float, ...] = ()
+            omega_variable_derivative = None
             if start_turbulence is not None:
                 turbulence_derivative = _sst_residual(
                     primitive,
@@ -320,19 +347,77 @@ def solve_case(
                         np.mean(turbulence_derivative**2, axis=0)
                     )
                 )
+                if regularized_omega is not None:
+                    omega_variable_derivative = _sst_regularized_rate(
+                        primitive,
+                        derivative,
+                        start_turbulence,
+                        turbulence_derivative,
+                        settings,
+                    )
             if settings.time_integration == "Explicit Euler":
                 conservative = start + time_step * derivative
                 if start_turbulence is not None:
-                    turbulence_conservative = _positive_turbulence_state(
-                        start_turbulence + time_step * turbulence_derivative
+                    updated_k = np.maximum(
+                        start_turbulence[:, 0]
+                        + time_step * turbulence_derivative[:, 0],
+                        0.0,
                     )
+                    if regularized_omega is not None:
+                        regularized_omega = (
+                            regularized_omega
+                            + time_step * omega_variable_derivative
+                        )
+                        updated_primitive = _primitive_from_conservative(
+                            conservative,
+                            np.column_stack((updated_k, start_turbulence[:, 1])),
+                            settings.gamma,
+                        )
+                        turbulence_conservative = _sst_regularized_turbulence(
+                            updated_primitive,
+                            updated_k,
+                            regularized_omega,
+                            geometry,
+                            settings,
+                        )
+                    else:
+                        turbulence_conservative = _positive_turbulence_state(
+                            start_turbulence + time_step * turbulence_derivative
+                        )
             else:
                 stage_one = start + time_step * derivative
                 stage_one_turbulence = None
+                stage_one_omega_variable = None
                 if start_turbulence is not None:
-                    stage_one_turbulence = _positive_turbulence_state(
-                        start_turbulence + time_step * turbulence_derivative
+                    stage_one_k = np.maximum(
+                        start_turbulence[:, 0]
+                        + time_step * turbulence_derivative[:, 0],
+                        0.0,
                     )
+                    if regularized_omega is not None:
+                        stage_one_omega_variable = (
+                            regularized_omega
+                            + time_step * omega_variable_derivative
+                        )
+                        stage_one_primitive = _primitive_from_conservative(
+                            stage_one,
+                            np.column_stack(
+                                (stage_one_k, start_turbulence[:, 1])
+                            ),
+                            settings.gamma,
+                        )
+                        stage_one_turbulence = _sst_regularized_turbulence(
+                            stage_one_primitive,
+                            stage_one_k,
+                            stage_one_omega_variable,
+                            geometry,
+                            settings,
+                        )
+                    else:
+                        stage_one_turbulence = _positive_turbulence_state(
+                            start_turbulence
+                            + time_step * turbulence_derivative
+                        )
                 stage_one_primitive = _primitive_from_conservative(
                     stage_one, stage_one_turbulence, settings.gamma
                 )
@@ -346,33 +431,109 @@ def solve_case(
                         geometry,
                         settings,
                     )
+                    if stage_one_omega_variable is not None:
+                        omega_variable_derivative_one = _sst_regularized_rate(
+                            stage_one_primitive,
+                            derivative_one,
+                            stage_one_turbulence,
+                            turbulence_derivative_one,
+                            settings,
+                        )
                 if settings.time_integration == "Explicit RK2":
                     conservative = 0.5 * start + 0.5 * (
                         stage_one + time_step * derivative_one
                     )
                     if start_turbulence is not None:
-                        turbulence_conservative = _positive_turbulence_state(
-                            0.5 * start_turbulence
+                        updated_k = np.maximum(
+                            0.5 * start_turbulence[:, 0]
                             + 0.5
                             * (
-                                stage_one_turbulence
-                                + time_step * turbulence_derivative_one
-                            )
+                                stage_one_turbulence[:, 0]
+                                + time_step * turbulence_derivative_one[:, 0]
+                            ),
+                            0.0,
                         )
+                        if regularized_omega is not None:
+                            regularized_omega = 0.5 * regularized_omega + 0.5 * (
+                                stage_one_omega_variable
+                                + time_step * omega_variable_derivative_one
+                            )
+                            updated_primitive = _primitive_from_conservative(
+                                conservative,
+                                np.column_stack(
+                                    (updated_k, stage_one_turbulence[:, 1])
+                                ),
+                                settings.gamma,
+                            )
+                            turbulence_conservative = (
+                                _sst_regularized_turbulence(
+                                    updated_primitive,
+                                    updated_k,
+                                    regularized_omega,
+                                    geometry,
+                                    settings,
+                                )
+                            )
+                        else:
+                            turbulence_conservative = _positive_turbulence_state(
+                                0.5 * start_turbulence
+                                + 0.5
+                                * (
+                                    stage_one_turbulence
+                                    + time_step * turbulence_derivative_one
+                                )
+                            )
                 else:
                     stage_two = 0.75 * start + 0.25 * (
                         stage_one + time_step * derivative_one
                     )
                     stage_two_turbulence = None
+                    stage_two_omega_variable = None
                     if start_turbulence is not None:
-                        stage_two_turbulence = _positive_turbulence_state(
-                            0.75 * start_turbulence
+                        stage_two_k = np.maximum(
+                            0.75 * start_turbulence[:, 0]
                             + 0.25
                             * (
-                                stage_one_turbulence
-                                + time_step * turbulence_derivative_one
-                            )
+                                stage_one_turbulence[:, 0]
+                                + time_step * turbulence_derivative_one[:, 0]
+                            ),
+                            0.0,
                         )
+                        if regularized_omega is not None:
+                            stage_two_omega_variable = (
+                                0.75 * regularized_omega
+                                + 0.25
+                                * (
+                                    stage_one_omega_variable
+                                    + time_step
+                                    * omega_variable_derivative_one
+                                )
+                            )
+                            stage_two_primitive = _primitive_from_conservative(
+                                stage_two,
+                                np.column_stack(
+                                    (stage_two_k, stage_one_turbulence[:, 1])
+                                ),
+                                settings.gamma,
+                            )
+                            stage_two_turbulence = (
+                                _sst_regularized_turbulence(
+                                    stage_two_primitive,
+                                    stage_two_k,
+                                    stage_two_omega_variable,
+                                    geometry,
+                                    settings,
+                                )
+                            )
+                        else:
+                            stage_two_turbulence = _positive_turbulence_state(
+                                0.75 * start_turbulence
+                                + 0.25
+                                * (
+                                    stage_one_turbulence
+                                    + time_step * turbulence_derivative_one
+                                )
+                            )
                     stage_two_primitive = _primitive_from_conservative(
                         stage_two, stage_two_turbulence, settings.gamma
                     )
@@ -386,18 +547,63 @@ def solve_case(
                             geometry,
                             settings,
                         )
+                        if stage_two_omega_variable is not None:
+                            omega_variable_derivative_two = (
+                                _sst_regularized_rate(
+                                    stage_two_primitive,
+                                    derivative_two,
+                                    stage_two_turbulence,
+                                    turbulence_derivative_two,
+                                    settings,
+                                )
+                            )
                     conservative = (1.0 / 3.0) * start + (2.0 / 3.0) * (
                         stage_two + time_step * derivative_two
                     )
                     if start_turbulence is not None:
-                        turbulence_conservative = _positive_turbulence_state(
-                            (1.0 / 3.0) * start_turbulence
+                        updated_k = np.maximum(
+                            (1.0 / 3.0) * start_turbulence[:, 0]
                             + (2.0 / 3.0)
                             * (
-                                stage_two_turbulence
-                                + time_step * turbulence_derivative_two
-                            )
+                                stage_two_turbulence[:, 0]
+                                + time_step * turbulence_derivative_two[:, 0]
+                            ),
+                            0.0,
                         )
+                        if regularized_omega is not None:
+                            regularized_omega = (
+                                (1.0 / 3.0) * regularized_omega
+                                + (2.0 / 3.0)
+                                * (
+                                    stage_two_omega_variable
+                                    + time_step * omega_variable_derivative_two
+                                )
+                            )
+                            updated_primitive = _primitive_from_conservative(
+                                conservative,
+                                np.column_stack(
+                                    (updated_k, stage_two_turbulence[:, 1])
+                                ),
+                                settings.gamma,
+                            )
+                            turbulence_conservative = (
+                                _sst_regularized_turbulence(
+                                    updated_primitive,
+                                    updated_k,
+                                    regularized_omega,
+                                    geometry,
+                                    settings,
+                                )
+                            )
+                        else:
+                            turbulence_conservative = _positive_turbulence_state(
+                                (1.0 / 3.0) * start_turbulence
+                                + (2.0 / 3.0)
+                                * (
+                                    stage_two_turbulence
+                                    + time_step * turbulence_derivative_two
+                                )
+                            )
             _primitive_from_conservative(
                 conservative, turbulence_conservative, settings.gamma
             )
@@ -1702,11 +1908,21 @@ def _sst_wall_values(
                 raise SolverError("Wall face has invalid cell-center distance.")
             if settings.turbulence_wall_treatment == "Wall-resolved":
                 k_wall = 0.0
-                omega_wall = (
-                    60.0
-                    * viscosity[owner]
-                    / (0.075 * primitive[owner, 0] * distance**2)
-                )
+                if (
+                    settings.turbulence_omega_formulation
+                    == "Regularized k-log-omega"
+                ):
+                    omega_wall = (
+                        6.0
+                        * viscosity[owner]
+                        / (0.09 * primitive[owner, 0] * distance**2)
+                    )
+                else:
+                    omega_wall = (
+                        60.0
+                        * viscosity[owner]
+                        / (0.075 * primitive[owner, 0] * distance**2)
+                    )
             else:
                 tangential_velocity = primitive[owner, 1:3] - (
                     float(np.dot(primitive[owner, 1:3], normal)) * normal
@@ -1825,6 +2041,93 @@ def _scalar_gradients(
     return gradients
 
 
+def _sst_omega_wall_scale(
+    primitive: np.ndarray,
+    distances: np.ndarray,
+    settings: NumericalSettings,
+) -> np.ndarray:
+    density = primitive[:, 0]
+    temperature = primitive[:, 3] / (density * settings.gas_constant)
+    viscosity = _dynamic_viscosity(temperature, settings)
+    distance = np.maximum(distances, 1e-14)
+    return 6.0 * viscosity / (density * 0.09 * distance**2)
+
+
+def _sst_regularized_variable(
+    primitive: np.ndarray,
+    omega: np.ndarray,
+    geometry: _Geometry,
+    settings: NumericalSettings,
+) -> np.ndarray:
+    wall_scale = _sst_omega_wall_scale(
+        primitive, geometry.wall_distances, settings
+    )
+    variable = np.log(omega) - np.log(wall_scale)
+    if not np.isfinite(variable).all():
+        raise SolverError("Regularized SST omega initialization is non-finite.")
+    return variable
+
+
+def _sst_regularized_turbulence(
+    primitive: np.ndarray,
+    k_conservative: np.ndarray,
+    omega_variable: np.ndarray,
+    geometry: _Geometry,
+    settings: NumericalSettings,
+) -> np.ndarray:
+    wall_scale = _sst_omega_wall_scale(
+        primitive, geometry.wall_distances, settings
+    )
+    log_omega = np.log(wall_scale) + omega_variable
+    maximum_log = math.log(np.finfo(float).max) - 2.0
+    if not np.isfinite(log_omega).all() or np.any(log_omega > maximum_log):
+        raise SolverError("Regularized SST omega update exceeded the finite range.")
+    omega = np.maximum(np.exp(log_omega), 1e-12)
+    turbulence = np.column_stack(
+        (np.maximum(k_conservative, 0.0), primitive[:, 0] * omega)
+    )
+    if not np.isfinite(turbulence).all():
+        raise SolverError("Regularized SST update produced non-finite values.")
+    return turbulence
+
+
+def _sst_regularized_rate(
+    primitive: np.ndarray,
+    flow_derivative: np.ndarray,
+    turbulence_conservative: np.ndarray,
+    turbulence_derivative: np.ndarray,
+    settings: NumericalSettings,
+) -> np.ndarray:
+    density = primitive[:, 0]
+    omega = turbulence_conservative[:, 1] / density
+    rate = turbulence_derivative[:, 1] / (
+        density * np.maximum(omega, 1e-12)
+    )
+    if settings.viscosity_model == "Sutherland":
+        velocity = primitive[:, 1:3]
+        density_rate = flow_derivative[:, 0]
+        internal_energy_rate = (
+            flow_derivative[:, 3]
+            - np.sum(velocity * flow_derivative[:, 1:3], axis=1)
+            + 0.5 * np.sum(velocity**2, axis=1) * density_rate
+            - turbulence_derivative[:, 0]
+        )
+        pressure_rate = (settings.gamma - 1.0) * internal_energy_rate
+        temperature = primitive[:, 3] / (density * settings.gas_constant)
+        temperature_rate = (
+            pressure_rate / (density * settings.gas_constant)
+            - temperature * density_rate / density
+        )
+        viscosity_log_rate = (
+            1.5 / temperature
+            - 1.0 / (temperature + settings.sutherland_temperature)
+        ) * temperature_rate
+        rate -= viscosity_log_rate
+    if not np.isfinite(rate).all():
+        raise SolverError("Regularized SST omega rate is non-finite.")
+    return rate
+
+
 def _sst_fields(
     primitive: np.ndarray,
     turbulence: np.ndarray,
@@ -1845,6 +2148,58 @@ def _sst_fields(
     density = primitive[:, 0]
     kinetic_energy = np.maximum(turbulence[:, 0], 0.0)
     omega = np.maximum(turbulence[:, 1], 1e-12)
+    if settings.turbulence_omega_formulation == "Regularized k-log-omega":
+        wall_scale = _sst_omega_wall_scale(
+            primitive, geometry.wall_distances, settings
+        )
+        regularized_values = np.column_stack(
+            (turbulence[:, 0], np.log(omega) - np.log(wall_scale))
+        )
+        regularized_boundaries = {}
+        wall_log_boundaries = {}
+        for face_id, (k_value, omega_value) in boundary_values.items():
+            owner = int(geometry.owners[face_id])
+            if face_id in wall_values:
+                regularized_boundaries[face_id] = (k_value, 0.0)
+                normal_distance = abs(
+                    float(
+                        np.dot(
+                            geometry.face_centers[face_id]
+                            - geometry.centers[owner],
+                            geometry.face_normals[face_id],
+                        )
+                    )
+                )
+                face_scale = _sst_omega_wall_scale(
+                    primitive[owner : owner + 1],
+                    np.array([normal_distance]),
+                    settings,
+                )[0]
+                log_face_scale = math.log(float(face_scale))
+                wall_log_boundaries[face_id] = (
+                    log_face_scale,
+                    log_face_scale,
+                )
+            else:
+                regularized_boundaries[face_id] = (
+                    k_value,
+                    math.log(max(omega_value, 1e-12))
+                    - math.log(wall_scale[owner]),
+                )
+        regularized_gradients = _scalar_gradients(
+            regularized_values, geometry, regularized_boundaries
+        )
+        log_wall_values = np.log(wall_scale)
+        wall_log_gradients = _scalar_gradients(
+            np.column_stack((log_wall_values, log_wall_values)),
+            geometry,
+            wall_log_boundaries,
+        )
+        turbulence_gradients = regularized_gradients
+        turbulence_gradients[:, 1, :] = omega[:, None] * (
+            regularized_gradients[:, 1, :]
+            + wall_log_gradients[:, 0, :]
+        )
     temperature = primitive[:, 3] / (density * settings.gas_constant)
     molecular_viscosity = _dynamic_viscosity(temperature, settings)
     k_gradient = turbulence_gradients[:, 0, :]

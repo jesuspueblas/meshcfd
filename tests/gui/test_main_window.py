@@ -466,6 +466,16 @@ def test_sst_controls_update_model_and_boundary_inputs(qtbot, monkeypatch):
     panel = window.numerics_panel
     panel.turbulence_model_combo.setCurrentText("Menter k-omega SST")
     assert not window.convergence_history_widget._turbulence_group.isHidden()
+    assert panel.turbulence_omega_formulation_combo.currentText() == "Standard SST"
+    panel.turbulence_omega_formulation_combo.setCurrentText(
+        "Regularized k-log-omega"
+    )
+    assert window.case.numerics.turbulence_omega_formulation == (
+        "Regularized k-log-omega"
+    )
+    assert not panel.turbulence_wall_treatment_combo.isEnabled()
+    panel.turbulence_omega_formulation_combo.setCurrentText("Standard SST")
+    assert panel.turbulence_wall_treatment_combo.isEnabled()
     panel.turbulence_wall_treatment_combo.setCurrentText("Wall functions")
     assert window.case.numerics.turbulence_model == "Menter k-omega SST"
     assert window.case.numerics.turbulence_wall_treatment == "Wall functions"
