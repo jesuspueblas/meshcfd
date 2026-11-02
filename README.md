@@ -16,6 +16,9 @@ The current version provides:
   with Rusanov, HLLC, and Roe fluxes; explicit Euler, RK2, and RK3; and
   first-order, limited MUSCL-linear, and limited quadratic MUSCL-parabolic
   reconstruction.
+- Optional gradient-driven adaptive refinement during solver runs, including
+  directional or four-way splits, hanging-node subfaces, and coarsening through
+  the saved refinement hierarchy.
 - A bottom Output dock that records application messages and per-step time-step
   and conservative residual history. Live mesh-solution updates can be enabled
   in Numerical Setup; they are off by default and refresh every ten steps.
@@ -110,6 +113,17 @@ remain slip. Symmetry boundaries remain slip and adiabatic. Acceleration
 components are constant throughout the domain in m/s² and contribute both
 ρf to momentum and ρf·u to total energy. Diffusive explicit stability limits
 are included in the solver time step.
+
+Adaptive mesh refinement is enabled in Numerical Setup. Choose an indicator
+field, the adaptation interval, a refinement threshold, and the maximum
+refinement level. The solver estimates normalized least-squares gradients,
+bisects along the dominant direction, and splits into four when both
+directions are comparable. Existing sibling cells are coarsened when their
+indicator falls below one tenth of the refinement threshold. A one-level
+neighbor constraint limits hanging-node depth; periodic faces are refined
+together. Adapted solutions are transferred in conservative form, and the
+mesh hierarchy is embedded in the case file so refinement can be undone after
+reopening it.
 
 The optional Menter k-omega SST model requires Constant or Sutherland
 molecular viscosity. Set the base turbulent kinetic energy `k` in m²/s² and

@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from meshcfd.core.adaptation import adapt_mesh
 from meshcfd.core.model import (
     Case,
     FiniteVolumeMesh,
@@ -225,7 +226,7 @@ def test_case_saves_relative_mesh_reference_and_reloads_mesh(tmp_path):
     save_case(case_path, case)
 
     saved_data = json.loads(case_path.read_text(encoding="utf-8"))
-    assert saved_data["version"] == 10
+    assert saved_data["version"] == 11
     assert saved_data["mesh"] == "../mesh.json"
     assert isinstance(saved_data["mesh"], str)
 
@@ -266,7 +267,7 @@ def test_case_round_trip_preserves_final_solution(tmp_path):
     saved_data = json.loads(path.read_text(encoding="utf-8"))
     restored = load_case(path)
 
-    assert saved_data["version"] == 10
+    assert saved_data["version"] == 11
     assert saved_data["final_solution"] == [
         {
             "density": 0.9,
@@ -346,7 +347,7 @@ def test_periodic_pair_detection_and_case_round_trip(tmp_path):
     assert restored.periodic_pairs == case.periodic_pairs
     assert restored.boundary_conditions[1].kind == "Periodic"
     assert restored.boundary_conditions[3].kind == "Periodic"
-    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 10
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 11
 
 
 def test_regularized_sst_formulation_round_trips(tmp_path):
@@ -361,7 +362,33 @@ def test_regularized_sst_formulation_round_trips(tmp_path):
     assert restored.numerics.turbulence_omega_formulation == (
         "Regularized k-log-omega"
     )
-    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 10
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 11
+
+
+def test_adaptive_mesh_settings_and_hierarchy_round_trip(tmp_path):
+    case = Case(name="adaptive")
+    source_path = tmp_path / "source-mesh.json"
+    case.set_mesh(make_mesh(), source_path)
+    case.mesh, _ = adapt_mesh(case.mesh, {0: "xy"}, set())
+    case.numerics.adaptive_mesh = True
+    case.numerics.adaptation_interval = 7
+    case.numerics.adaptation_max_level = 4
+    case.numerics.adaptation_refine_threshold = 0.15
+    case.numerics.adaptation_variable = "Pressure"
+    path = tmp_path / "adaptive.mcf.json"
+
+    save_case(path, case)
+    restored = load_case(path)
+    saved_data = json.loads(path.read_text(encoding="utf-8"))
+
+    assert isinstance(saved_data["mesh"], dict)
+    assert restored.mesh_path is None
+    assert restored.mesh == case.mesh
+    assert restored.numerics.adaptive_mesh
+    assert restored.numerics.adaptation_interval == 7
+    assert restored.numerics.adaptation_max_level == 4
+    assert restored.numerics.adaptation_refine_threshold == pytest.approx(0.15)
+    assert restored.numerics.adaptation_variable == "Pressure"
 
 
 def test_regularized_sst_formulation_requires_wall_resolved_treatment():

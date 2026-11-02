@@ -129,6 +129,43 @@ class NumericsPanel(QWidget):
             "SST omega formulation:", self.turbulence_omega_formulation_combo
         )
 
+        self.adaptive_mesh_checkbox = QCheckBox("Enabled", self)
+        self.adaptive_mesh_checkbox.setToolTip(
+            "Refine and coarsen cells from the selected solution gradient while "
+            "the solver runs. Direction is selected automatically."
+        )
+        self.adaptation_interval_spin = QSpinBox(self)
+        self.adaptation_interval_spin.setRange(1, 10000000)
+        self.adaptation_max_level_spin = QSpinBox(self)
+        self.adaptation_max_level_spin.setRange(1, 12)
+        self.adaptation_threshold_spin = self._double_spin(
+            1e-4, 10.0, 0.25, 4
+        )
+        self.adaptation_variable_combo = self._combo(
+            (
+                "Density",
+                "Velocity X",
+                "Velocity Y",
+                "Pressure",
+                "Turbulent k",
+                "Specific dissipation rate",
+            )
+        )
+        self.adaptation_variable_combo.setToolTip(
+            "Turbulent k and omega indicators require Menter k-omega SST."
+        )
+        form.addRow("Adaptive mesh:", self.adaptive_mesh_checkbox)
+        form.addRow("Adapt every N steps:", self.adaptation_interval_spin)
+        form.addRow("Maximum refinement level:", self.adaptation_max_level_spin)
+        form.addRow("Refinement threshold:", self.adaptation_threshold_spin)
+        form.addRow("Gradient variable:", self.adaptation_variable_combo)
+        self.adaptive_controls = (
+            self.adaptation_interval_spin,
+            self.adaptation_max_level_spin,
+            self.adaptation_threshold_spin,
+            self.adaptation_variable_combo,
+        )
+
         self.live_solution_checkbox = QCheckBox("Update during run", self)
         self.live_solution_checkbox.setToolTip(
             "Refresh the mesh display every 10 solver steps. This adds rendering "
@@ -165,6 +202,11 @@ class NumericsPanel(QWidget):
             self.turbulence_model_combo,
             self.turbulence_wall_treatment_combo,
             self.turbulence_omega_formulation_combo,
+            self.adaptive_mesh_checkbox,
+            self.adaptation_interval_spin,
+            self.adaptation_max_level_spin,
+            self.adaptation_threshold_spin,
+            self.adaptation_variable_combo,
         )
         for combo in (
             self.reconstruction_combo,
@@ -204,9 +246,19 @@ class NumericsPanel(QWidget):
         self.turbulence_omega_formulation_combo.currentTextChanged.connect(
             self._sync_case
         )
+        self.adaptive_mesh_checkbox.toggled.connect(self._update_adaptive_controls)
+        self.adaptive_mesh_checkbox.toggled.connect(self._sync_case)
+        for control in (
+            self.adaptation_interval_spin,
+            self.adaptation_max_level_spin,
+            self.adaptation_threshold_spin,
+        ):
+            control.valueChanged.connect(self._sync_case)
+        self.adaptation_variable_combo.currentTextChanged.connect(self._sync_case)
         self.set_case(self._case)
         self._update_viscosity_controls()
         self._update_turbulence_controls()
+        self._update_adaptive_controls()
 
     def _combo(self, values: tuple[str, ...]) -> QComboBox:
         combo = QComboBox(self)
@@ -256,10 +308,20 @@ class NumericsPanel(QWidget):
         self.turbulence_omega_formulation_combo.setCurrentText(
             settings.turbulence_omega_formulation
         )
+        self.adaptive_mesh_checkbox.setChecked(settings.adaptive_mesh)
+        self.adaptation_interval_spin.setValue(settings.adaptation_interval)
+        self.adaptation_max_level_spin.setValue(settings.adaptation_max_level)
+        self.adaptation_threshold_spin.setValue(
+            settings.adaptation_refine_threshold
+        )
+        self.adaptation_variable_combo.setCurrentText(
+            settings.adaptation_variable
+        )
         for control in self._controls:
             control.blockSignals(False)
         self._update_viscosity_controls()
         self._update_turbulence_controls()
+        self._update_adaptive_controls()
 
     def _sync_case(self, *_args) -> None:
         settings = self._case.numerics
@@ -292,7 +354,22 @@ class NumericsPanel(QWidget):
         settings.turbulence_omega_formulation = (
             self.turbulence_omega_formulation_combo.currentText()
         )
+        settings.adaptive_mesh = self.adaptive_mesh_checkbox.isChecked()
+        settings.adaptation_interval = self.adaptation_interval_spin.value()
+        settings.adaptation_max_level = self.adaptation_max_level_spin.value()
+        settings.adaptation_refine_threshold = (
+            self.adaptation_threshold_spin.value()
+        )
+        settings.adaptation_variable = self.adaptation_variable_combo.currentText()
         self.changed.emit()
+
+    def _update_adaptive_controls(self, *_args) -> None:
+        enabled = self.adaptive_mesh_checkbox.isChecked()
+        for control in self.adaptive_controls:
+            control.setVisible(enabled)
+            label = self.layout().labelForField(control)
+            if label is not None:
+                label.setVisible(enabled)
 
     def _update_viscosity_controls(self, *_args) -> None:
         model = self.viscosity_model_combo.currentText()

@@ -356,6 +356,54 @@ def test_derived_stagnation_fields_and_mach_number():
     assert fields["total_density"][0] == pytest.approx(total_factor**2.5)
 
 
+def test_solver_adapts_mesh_at_configured_gradient_interval():
+    case = make_periodic_case(2, 1)
+    case.periodic_pairs.clear()
+    for boundary in case.boundary_conditions:
+        boundary.kind = "Wall"
+    case.numerics.reconstruction = "First order"
+    case.numerics.time_integration = "Explicit Euler"
+    case.numerics.max_iterations = 2
+    case.numerics.end_time = 1.0
+    case.numerics.adaptive_mesh = True
+    case.numerics.adaptation_interval = 1
+    case.numerics.adaptation_max_level = 1
+    case.numerics.adaptation_refine_threshold = 0.01
+    states = (
+        InitialState(density=1.0, pressure=1.0),
+        InitialState(density=2.0, pressure=1.0),
+    )
+
+    result = solve_case(case, states)
+
+    assert len(case.mesh.cells) == len(result.states) == 4
+    assert case.mesh.cell_levels == (1, 1, 1, 1)
+    assert sum(
+        state.density * area
+        for state, area in zip(result.states, _build_geometry(case.mesh, case).areas)
+    ) == pytest.approx(1.5)
+
+
+def test_adaptation_keeps_periodic_face_subdivisions_matching():
+    case = make_periodic_case(2, 2)
+    case.numerics.reconstruction = "First order"
+    case.numerics.time_integration = "Explicit Euler"
+    case.numerics.max_iterations = 1
+    case.numerics.adaptive_mesh = True
+    case.numerics.adaptation_interval = 1
+    case.numerics.adaptation_max_level = 1
+    case.numerics.adaptation_refine_threshold = 0.01
+    states = tuple(
+        InitialState(density=1.0 if cell < 2 else 2.0, pressure=1.0)
+        for cell in range(4)
+    )
+
+    result = solve_case(case, states)
+
+    assert len(result.states) == len(case.mesh.cells) == 8
+    _build_geometry(case.mesh, case)
+
+
 def test_sst_derived_fields_include_wall_distance_and_regularized_log_omega():
     case = make_periodic_case()
     case.periodic_pairs.clear()

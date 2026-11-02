@@ -28,13 +28,34 @@ from meshcfd.core.periodic import detect_periodic_pair
 from meshcfd.io.mesh_io import load_mesh, mesh_from_dict, mesh_to_dict
 
 PROJECT_FORMAT = "meshcfd-case"
-PROJECT_VERSION = 10
+PROJECT_VERSION = 11
 
 
 def case_to_dict(
     case: Case, case_path: str | Path | None = None
 ) -> dict[str, Any]:
     end_time = _positive_float(case.numerics.end_time, "End time")
+    if not isinstance(case.numerics.adaptive_mesh, bool):
+        raise ValueError("Adaptive mesh setting must be boolean.")
+    _positive_integer(case.numerics.adaptation_interval, "Adaptation interval")
+    maximum_level = _positive_integer(
+        case.numerics.adaptation_max_level, "Maximum adaptation level"
+    )
+    if maximum_level > 12:
+        raise ValueError("Maximum adaptation level must not exceed 12.")
+    _positive_float(
+        case.numerics.adaptation_refine_threshold,
+        "Adaptation refinement threshold",
+    )
+    if case.numerics.adaptation_variable not in (
+        "Density",
+        "Velocity X",
+        "Velocity Y",
+        "Pressure",
+        "Turbulent k",
+        "Specific dissipation rate",
+    ):
+        raise ValueError("Unsupported adaptive mesh indicator variable.")
     for condition in case.boundary_conditions:
         _mechanical_condition(condition.mechanical_condition)
         _thermal_condition(condition.thermal_condition)
@@ -81,7 +102,9 @@ def case_to_dict(
     )
     if case.mesh is None:
         mesh_data = None
-    elif case.mesh_path is None:
+    elif case.mesh_path is None or case.mesh.refinement_records or any(
+        level > 0 for level in case.mesh.cell_levels
+    ):
         mesh_data = mesh_to_dict(case.mesh)
     else:
         if case_path is None:
@@ -155,6 +178,13 @@ def case_to_dict(
             "prandtl_number": case.numerics.prandtl_number,
             "acceleration_x": case.numerics.acceleration_x,
             "acceleration_y": case.numerics.acceleration_y,
+            "adaptive_mesh": case.numerics.adaptive_mesh,
+            "adaptation_interval": case.numerics.adaptation_interval,
+            "adaptation_max_level": case.numerics.adaptation_max_level,
+            "adaptation_refine_threshold": (
+                case.numerics.adaptation_refine_threshold
+            ),
+            "adaptation_variable": case.numerics.adaptation_variable,
             "turbulence_model": case.numerics.turbulence_model,
             "turbulence_wall_treatment": (
                 case.numerics.turbulence_wall_treatment
@@ -184,6 +214,7 @@ def case_from_dict(
         7,
         8,
         9,
+        10,
         PROJECT_VERSION,
     ):
         raise ValueError(
@@ -337,6 +368,27 @@ def case_from_dict(
             raw_numerics.get("acceleration_y", defaults.acceleration_y),
             "Acceleration Y",
         ),
+        adaptive_mesh=raw_numerics.get(
+            "adaptive_mesh", defaults.adaptive_mesh
+        ),
+        adaptation_interval=_positive_integer(
+            raw_numerics.get("adaptation_interval", defaults.adaptation_interval),
+            "Adaptation interval",
+        ),
+        adaptation_max_level=_positive_integer(
+            raw_numerics.get("adaptation_max_level", defaults.adaptation_max_level),
+            "Maximum adaptation level",
+        ),
+        adaptation_refine_threshold=_positive_float(
+            raw_numerics.get(
+                "adaptation_refine_threshold",
+                defaults.adaptation_refine_threshold,
+            ),
+            "Adaptation refinement threshold",
+        ),
+        adaptation_variable=raw_numerics.get(
+            "adaptation_variable", defaults.adaptation_variable
+        ),
         turbulence_model=raw_numerics.get(
             "turbulence_model", defaults.turbulence_model
         ),
@@ -348,6 +400,10 @@ def case_from_dict(
             defaults.turbulence_omega_formulation,
         ),
     )
+    if not isinstance(settings.adaptive_mesh, bool):
+        raise ValueError("Adaptive mesh setting must be boolean.")
+    if settings.adaptation_max_level > 12:
+        raise ValueError("Maximum adaptation level must not exceed 12.")
     for key, choices in (
         ("reconstruction", RECONSTRUCTION_SCHEMES),
         ("limiter", LIMITER_SCHEMES),
@@ -365,6 +421,15 @@ def case_from_dict(
             raise ValueError(f"Unsupported numerical setting for {key}.")
     if settings.gamma <= 1.0:
         raise ValueError("Gamma must be greater than 1.")
+    if settings.adaptation_variable not in (
+        "Density",
+        "Velocity X",
+        "Velocity Y",
+        "Pressure",
+        "Turbulent k",
+        "Specific dissipation rate",
+    ):
+        raise ValueError("Unsupported adaptive mesh indicator variable.")
     if (
         settings.turbulence_model == "Menter k-omega SST"
         and settings.turbulence_omega_formulation

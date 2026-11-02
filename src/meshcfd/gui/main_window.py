@@ -1094,6 +1094,15 @@ class MainWindow(QMainWindow):
             progress.states is not None
             and self._run_revision == self._case_revision
         ):
+            if progress.mesh is not None:
+                self.case.mesh = progress.mesh
+                self.case.mesh_path = None
+                self.canvas.set_mesh(progress.mesh)
+                self._update_mesh_info()
+                self._log_output(
+                    f"Adaptive mesh updated at step {progress.step}: "
+                    f"{len(progress.mesh.cells)} cells."
+                )
             self._simulation_solution = progress.states
             self._latest_solution_progress = progress
             self._update_visualization()
@@ -1142,6 +1151,14 @@ class MainWindow(QMainWindow):
             )
             return
         settings_unchanged = self._run_revision == self._case_revision
+        if worker.case.mesh != self.case.mesh:
+            self.case.mesh = worker.case.mesh
+            self.case.mesh_path = None
+            self.canvas.set_mesh(worker.case.mesh)
+            self._update_mesh_info()
+            self._log_output(
+                f"Adaptive mesh finished with {len(worker.case.mesh.cells)} cells."
+            )
         self._simulation_solution = result.states
         self._latest_solution_progress = None
         self.case.final_solution = result.states

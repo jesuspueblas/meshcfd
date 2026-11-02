@@ -30,6 +30,14 @@ class MeshPatch:
     face_ids: tuple[int, ...]
 
 
+@dataclass(frozen=True)
+class RefinementRecord:
+    parent_id: str
+    child_ids: tuple[str, ...]
+    vertices: tuple[tuple[float, float], ...]
+    level: int
+
+
 @dataclass
 class FiniteVolumeMesh:
     points: tuple[tuple[float, float], ...]
@@ -41,6 +49,9 @@ class FiniteVolumeMesh:
     patches: tuple[MeshPatch, ...]
     cell_face_ids: tuple[tuple[int, ...], ...]
     cell_face_signs: tuple[tuple[int, ...], ...]
+    cell_ids: tuple[str, ...] = ()
+    cell_levels: tuple[int, ...] = ()
+    refinement_records: tuple[RefinementRecord, ...] = ()
 
 
 @dataclass
@@ -81,6 +92,11 @@ class NumericalSettings:
     prandtl_number: float = 0.72
     acceleration_x: float = 0.0
     acceleration_y: float = 0.0
+    adaptive_mesh: bool = False
+    adaptation_interval: int = 20
+    adaptation_max_level: int = 3
+    adaptation_refine_threshold: float = 0.25
+    adaptation_variable: str = "Density"
     turbulence_model: str = "None"
     turbulence_wall_treatment: str = "Wall-resolved"
     turbulence_omega_formulation: str = "Standard SST"

@@ -8,6 +8,11 @@ from typing import Callable
 
 import numpy as np
 
+from meshcfd.core.adaptation import (
+    adapt_mesh,
+    cell_areas,
+    select_adaptation,
+)
 from meshcfd.core.euler import (
     conservative_to_primitive,
     numerical_flux,
@@ -35,6 +40,7 @@ class SolverProgress:
     time_step: float
     residuals: tuple[float, ...]
     states: tuple[InitialState, ...] | None = None
+    mesh: FiniteVolumeMesh | None = None
 
 
 @dataclass(frozen=True)
@@ -199,6 +205,41 @@ def solve_case(
         or solution_interval <= 0
     ):
         raise SolverError("Solution output interval must be a positive integer.")
+    if not isinstance(settings.adaptive_mesh, bool):
+        raise SolverError("Adaptive mesh setting must be boolean.")
+    if (
+        isinstance(settings.adaptation_interval, bool)
+        or not isinstance(settings.adaptation_interval, int)
+        or settings.adaptation_interval <= 0
+    ):
+        raise SolverError("Adaptation interval must be a positive integer.")
+    if (
+        isinstance(settings.adaptation_max_level, bool)
+        or not isinstance(settings.adaptation_max_level, int)
+        or not 1 <= settings.adaptation_max_level <= 12
+    ):
+        raise SolverError("Maximum adaptation level must be an integer from 1 to 12.")
+    if (
+        not math.isfinite(settings.adaptation_refine_threshold)
+        or settings.adaptation_refine_threshold <= 0.0
+    ):
+        raise SolverError("Adaptation threshold must be positive and finite.")
+    if settings.adaptation_variable not in (
+        "Density",
+        "Velocity X",
+        "Velocity Y",
+        "Pressure",
+        "Turbulent k",
+        "Specific dissipation rate",
+    ):
+        raise SolverError("Unsupported adaptive mesh indicator variable.")
+    if settings.adaptive_mesh and settings.adaptation_variable in (
+        "Turbulent k",
+        "Specific dissipation rate",
+    ) and settings.turbulence_model != "Menter k-omega SST":
+        raise SolverError(
+            "Turbulence-based adaptation indicators require the SST model."
+        )
     if not math.isfinite(settings.gamma) or settings.gamma <= 1.0:
         raise SolverError("Specific heat ratio must be finite and greater than 1.")
     if not math.isfinite(settings.gas_constant) or settings.gas_constant <= 0.0:
@@ -612,14 +653,72 @@ def solve_case(
         time += time_step
         steps = step
         residual = float(np.sqrt(np.mean(derivative**2)))
+        adapted_mesh = None
+        if settings.adaptive_mesh and step % settings.adaptation_interval == 0:
+            current_primitive = _primitive_from_conservative(
+                conservative, turbulence_conservative, settings.gamma
+            )
+            indicator_values = _adaptation_indicator_values(
+                current_primitive,
+                turbulence_conservative,
+                settings.adaptation_variable,
+            )
+            try:
+                refine_marks, coarsen_parent_ids = select_adaptation(
+                    mesh,
+                    case,
+                    geometry.centers,
+                    geometry.areas,
+                    indicator_values,
+                    settings.adaptation_refine_threshold,
+                    settings.adaptation_max_level,
+                )
+                if refine_marks or coarsen_parent_ids:
+                    old_areas = np.asarray(cell_areas(mesh), dtype=float)
+                    adapted, source_groups = adapt_mesh(
+                        mesh, refine_marks, coarsen_parent_ids
+                    )
+                    if adapted is not mesh:
+                        conservative = _transfer_cell_values(
+                            conservative, old_areas, source_groups
+                        )
+                        if turbulence_conservative is not None:
+                            turbulence_conservative = _transfer_cell_values(
+                                turbulence_conservative,
+                                old_areas,
+                                source_groups,
+                            )
+                        mesh = adapted
+                        case.mesh = adapted
+                        geometry = _build_geometry(mesh, case)
+                        if turbulence_conservative is not None:
+                            current_primitive = _primitive_from_conservative(
+                                conservative,
+                                turbulence_conservative,
+                                settings.gamma,
+                            )
+                            if regularized_omega is not None:
+                                regularized_omega = _sst_regularized_variable(
+                                    current_primitive,
+                                    turbulence_conservative[:, 1]
+                                    / current_primitive[:, :1].ravel(),
+                                    geometry,
+                                    settings,
+                                )
+                        adapted_mesh = mesh
+            except (ValueError, FloatingPointError, np.linalg.LinAlgError) as error:
+                raise SolverError(f"Adaptive mesh update failed at step {step}: {error}") from error
         if progress_callback is not None:
             progress_states = None
-            if live_solution_updates and (
-                local_step == 1
-                or step % 10 == 0
-                or time >= settings.end_time * (1.0 - 1e-13)
-                or local_step == settings.max_iterations
-            ):
+            if (
+                live_solution_updates
+                and (
+                    local_step == 1
+                    or step % 10 == 0
+                    or time >= settings.end_time * (1.0 - 1e-13)
+                    or local_step == settings.max_iterations
+                )
+            ) or adapted_mesh is not None:
                 progress_primitive = _primitive_from_conservative(
                     conservative, turbulence_conservative, settings.gamma
                 )
@@ -637,6 +736,7 @@ def solve_case(
                     time_step,
                     component_residuals,
                     progress_states,
+                    adapted_mesh,
                 )
             )
         if solution_callback is not None and step % solution_interval == 0:
@@ -666,6 +766,45 @@ def solve_case(
     residual = float(np.sqrt(np.mean(final_residual**2)))
     states = _states_from_solution(final_primitive, turbulence_conservative)
     return SolverResult(states, time, steps, residual, completed)
+
+
+def _adaptation_indicator_values(
+    primitive: np.ndarray,
+    turbulence_conservative: np.ndarray | None,
+    variable: str,
+) -> np.ndarray:
+    if variable == "Density":
+        return primitive[:, 0]
+    if variable == "Velocity X":
+        return primitive[:, 1]
+    if variable == "Velocity Y":
+        return primitive[:, 2]
+    if variable == "Pressure":
+        return primitive[:, 3]
+    if variable == "Turbulent k":
+        if turbulence_conservative is None:
+            raise SolverError("Turbulent k adaptation requires the SST model.")
+        return turbulence_conservative[:, 0] / primitive[:, 0]
+    if variable == "Specific dissipation rate":
+        if turbulence_conservative is None:
+            raise SolverError("Omega adaptation requires the SST model.")
+        return turbulence_conservative[:, 1] / primitive[:, 0]
+    raise SolverError(f"Unsupported adaptive mesh indicator '{variable}'.")
+
+
+def _transfer_cell_values(
+    values: np.ndarray,
+    old_areas: np.ndarray,
+    source_groups: tuple[tuple[int, ...], ...],
+) -> np.ndarray:
+    transferred = []
+    for source_group in source_groups:
+        indices = np.asarray(source_group, dtype=int)
+        weights = old_areas[indices]
+        transferred.append(
+            np.average(values[indices], axis=0, weights=weights)
+        )
+    return np.asarray(transferred, dtype=float)
 
 
 def _primitive_from_conservative(

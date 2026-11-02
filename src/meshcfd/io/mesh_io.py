@@ -7,7 +7,7 @@ import math
 from pathlib import Path
 from typing import Any
 
-from meshcfd.core.model import FiniteVolumeMesh, MeshPatch
+from meshcfd.core.model import FiniteVolumeMesh, MeshPatch, RefinementRecord
 
 FORMAT_NAME = "meshcad-mesh"
 FORMAT_VERSION = 1
@@ -183,6 +183,76 @@ def mesh_from_dict(data: dict[str, Any]) -> FiniteVolumeMesh:
         if (patch_id != NO_NEIGHBOUR) != (face_id in listed_face_ids):
             raise MeshImportError(f"Face {face_id} has inconsistent patch membership.")
 
+    raw_refinement = data.get("refinement", {})
+    if not isinstance(raw_refinement, dict):
+        raise MeshImportError("Refinement metadata must be an object.")
+    raw_cell_ids = raw_refinement.get("cell_ids", [])
+    raw_cell_levels = raw_refinement.get("cell_levels", [])
+    if not isinstance(raw_cell_ids, list) or not isinstance(raw_cell_levels, list):
+        raise MeshImportError("Cell refinement identifiers and levels must be lists.")
+    cell_ids = []
+    for cell_id in raw_cell_ids:
+        if not isinstance(cell_id, str) or not cell_id:
+            raise MeshImportError("Cell refinement identifiers must be non-empty strings.")
+        cell_ids.append(cell_id)
+    cell_levels = _integer_list(raw_cell_levels, "Cell refinement levels")
+    if (cell_ids or cell_levels) and not (
+        len(cell_ids) == len(cell_levels) == len(cells)
+    ):
+        raise MeshImportError("Cell refinement metadata has inconsistent lengths.")
+    if len(set(cell_ids)) != len(cell_ids) or any(level < 0 for level in cell_levels):
+        raise MeshImportError("Cell refinement metadata contains duplicate or negative values.")
+
+    raw_records = raw_refinement.get("records", [])
+    if not isinstance(raw_records, list):
+        raise MeshImportError("Refinement records must be a list.")
+    if raw_records and not cell_ids:
+        raise MeshImportError("Refinement records require cell identifiers and levels.")
+    records = []
+    parent_ids = set()
+    for index, raw_record in enumerate(raw_records):
+        if not isinstance(raw_record, dict):
+            raise MeshImportError(f"Refinement record {index} must be an object.")
+        parent_id = raw_record.get("parent_id")
+        child_ids = raw_record.get("child_ids")
+        vertices = raw_record.get("vertices")
+        level = _integer(raw_record.get("level"), "Refinement parent level")
+        if (
+            not isinstance(parent_id, str)
+            or not parent_id
+            or parent_id in parent_ids
+            or not isinstance(child_ids, list)
+            or len(child_ids) < 2
+            or any(not isinstance(child, str) or not child for child in child_ids)
+            or len(set(child_ids)) != len(child_ids)
+            or not isinstance(vertices, list)
+            or len(vertices) < 3
+            or level < 0
+        ):
+            raise MeshImportError(f"Refinement record {index} is invalid.")
+        parent_ids.add(parent_id)
+        parsed_vertices = []
+        for vertex in vertices:
+            if not isinstance(vertex, list) or len(vertex) != 2:
+                raise MeshImportError(f"Refinement record {index} has invalid vertices.")
+            try:
+                point = (float(vertex[0]), float(vertex[1]))
+            except (OverflowError, TypeError, ValueError) as error:
+                raise MeshImportError(
+                    f"Refinement record {index} has invalid vertices."
+                ) from error
+            if not all(math.isfinite(value) for value in point):
+                raise MeshImportError(f"Refinement record {index} has non-finite vertices.")
+            parsed_vertices.append(point)
+        records.append(
+            RefinementRecord(
+                parent_id,
+                tuple(child_ids),
+                tuple(parsed_vertices),
+                level,
+            )
+        )
+
     return FiniteVolumeMesh(
         points=tuple(points),
         cells=tuple(cells),
@@ -193,6 +263,9 @@ def mesh_from_dict(data: dict[str, Any]) -> FiniteVolumeMesh:
         patches=tuple(patches),
         cell_face_ids=tuple(stored_cell_face_ids),
         cell_face_signs=tuple(stored_cell_face_signs),
+        cell_ids=tuple(cell_ids),
+        cell_levels=tuple(cell_levels),
+        refinement_records=tuple(records),
     )
 
 
@@ -210,7 +283,7 @@ def load_mesh(path: str | Path) -> FiniteVolumeMesh:
 
 def mesh_to_dict(mesh: FiniteVolumeMesh) -> dict[str, Any]:
     """Serialize a mesh for embedding in a portable case file."""
-    return {
+    data = {
         "format": FORMAT_NAME,
         "version": FORMAT_VERSION,
         "dimension": 2,
@@ -230,3 +303,18 @@ def mesh_to_dict(mesh: FiniteVolumeMesh) -> dict[str, Any]:
             for patch in mesh.patches
         ],
     }
+    if mesh.cell_ids or mesh.cell_levels or mesh.refinement_records:
+        data["refinement"] = {
+            "cell_ids": list(mesh.cell_ids),
+            "cell_levels": list(mesh.cell_levels),
+            "records": [
+                {
+                    "parent_id": record.parent_id,
+                    "child_ids": list(record.child_ids),
+                    "vertices": [list(point) for point in record.vertices],
+                    "level": record.level,
+                }
+                for record in mesh.refinement_records
+            ],
+        }
+    return data

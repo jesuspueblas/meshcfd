@@ -85,6 +85,26 @@ def test_main_window_initial_state(qtbot):
         assert dock.allowedAreas() == Qt.AllDockWidgetAreas
 
 
+def test_adaptive_mesh_controls_update_numerical_settings(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    panel = window.numerics_panel
+
+    assert not panel.adaptive_mesh_checkbox.isChecked()
+    assert not panel.adaptation_interval_spin.isVisible()
+    panel.adaptive_mesh_checkbox.setChecked(True)
+    panel.adaptation_interval_spin.setValue(5)
+    panel.adaptation_max_level_spin.setValue(6)
+    panel.adaptation_threshold_spin.setValue(0.1)
+    panel.adaptation_variable_combo.setCurrentText("Pressure")
+
+    assert window.case.numerics.adaptive_mesh
+    assert window.case.numerics.adaptation_interval == 5
+    assert window.case.numerics.adaptation_max_level == 6
+    assert window.case.numerics.adaptation_refine_threshold == pytest.approx(0.1)
+    assert window.case.numerics.adaptation_variable == "Pressure"
+
+
 def test_result_actions_export_vtu_and_configure_series(qtbot, monkeypatch, tmp_path):
     window = MainWindow()
     qtbot.addWidget(window)
