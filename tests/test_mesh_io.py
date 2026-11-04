@@ -54,3 +54,33 @@ def test_mesh_import_rejects_non_finite_coordinates(mesh_data):
 
     with pytest.raises(MeshImportError, match="finite"):
         mesh_from_dict(mesh_data)
+
+
+def test_mesh_boundary_curve_metadata_round_trips_and_validates(mesh_data):
+    mesh_data["boundary_curves"] = [
+        {
+            "geometry": {
+                "type": "arc",
+                "center": [0.5, 0.5],
+                "radius": 2**0.5 / 2,
+                "start_angle": -3 * 3.141592653589793 / 4,
+                "end_angle": -3.141592653589793 / 4,
+            },
+            "parameters": [0.0, 1.0],
+            "patch_id": 0,
+        },
+        None,
+        None,
+        None,
+    ]
+
+    mesh = mesh_from_dict(mesh_data)
+
+    assert mesh.face_curves[0] is not None
+    assert mesh.face_curves[0].geometry["type"] == "arc"
+    assert mesh_to_dict(mesh)["boundary_curves"] == mesh_data["boundary_curves"]
+    assert mesh_from_dict(mesh_to_dict(mesh)) == mesh
+
+    mesh_data["boundary_curves"][0]["parameters"] = [0.0, 0.5]
+    with pytest.raises(MeshImportError, match="does not match its face nodes"):
+        mesh_from_dict(mesh_data)

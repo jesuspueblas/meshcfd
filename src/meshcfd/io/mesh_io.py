@@ -7,7 +7,13 @@ import math
 from pathlib import Path
 from typing import Any
 
-from meshcfd.core.model import FiniteVolumeMesh, MeshPatch, RefinementRecord
+from meshcfd.core.curves import evaluate_boundary_curve
+from meshcfd.core.model import (
+    BoundaryCurve,
+    FiniteVolumeMesh,
+    MeshPatch,
+    RefinementRecord,
+)
 
 FORMAT_NAME = "meshcad-mesh"
 FORMAT_VERSION = 1
@@ -28,6 +34,100 @@ def _integer_list(value: Any, description: str) -> list[int]:
     if not isinstance(value, list):
         raise MeshImportError(f"{description} must be a list.")
     return [_integer(item, description) for item in value]
+
+
+def _finite_number(value: Any, description: str) -> float:
+    if isinstance(value, bool):
+        raise MeshImportError(f"{description} must be a finite number.")
+    try:
+        number = float(value)
+    except (OverflowError, TypeError, ValueError) as error:
+        raise MeshImportError(f"{description} must be a finite number.") from error
+    if not math.isfinite(number):
+        raise MeshImportError(f"{description} must be a finite number.")
+    return number
+
+
+def _curve_geometry(value: Any, description: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise MeshImportError(f"{description} must be an object.")
+    kind = value.get("type")
+    if kind == "line":
+        keys = ("start", "end")
+    elif kind == "arc":
+        center = value.get("center")
+        if not isinstance(center, list) or len(center) != 2:
+            raise MeshImportError(f"{description} has an invalid arc center.")
+        radius = _finite_number(value.get("radius"), f"{description} arc radius")
+        if radius <= 0.0:
+            raise MeshImportError(f"{description} arc radius must be positive.")
+        return {
+            "type": kind,
+            "center": [
+                _finite_number(item, f"{description} arc center")
+                for item in center
+            ],
+            "radius": radius,
+            "start_angle": _finite_number(
+                value.get("start_angle"), f"{description} arc start angle"
+            ),
+            "end_angle": _finite_number(
+                value.get("end_angle"), f"{description} arc end angle"
+            ),
+        }
+    elif kind in ("spline", "spline_segment"):
+        raw_points = value.get("points")
+        if (
+            not isinstance(raw_points, list)
+            or len(raw_points) < 2
+            or any(not isinstance(point, list) or len(point) != 2 for point in raw_points)
+        ):
+            raise MeshImportError(f"{description} has invalid spline points.")
+        points = [
+            [
+                _finite_number(item, f"{description} spline point")
+                for item in point
+            ]
+            for point in raw_points
+        ]
+        if kind == "spline":
+            return {"type": kind, "points": points}
+        start_t = _finite_number(
+            value.get("start_t"), f"{description} spline start parameter"
+        )
+        end_t = _finite_number(
+            value.get("end_t"), f"{description} spline end parameter"
+        )
+        if not 0.0 <= start_t < end_t <= 1.0:
+            raise MeshImportError(f"{description} has invalid spline parameters.")
+        offsets = {}
+        for key in ("start_offset", "end_offset"):
+            offset = value.get(key, [0.0, 0.0])
+            if not isinstance(offset, list) or len(offset) != 2:
+                raise MeshImportError(f"{description} has an invalid {key}.")
+            offsets[key] = [
+                _finite_number(item, f"{description} {key}") for item in offset
+            ]
+        return {
+            "type": kind,
+            "points": points,
+            "start_t": start_t,
+            "end_t": end_t,
+            **offsets,
+        }
+    else:
+        raise MeshImportError(f"{description} has an unsupported geometry type.")
+
+    coordinates = {}
+    for key in keys:
+        point = value.get(key)
+        if not isinstance(point, list) or len(point) != 2:
+            raise MeshImportError(f"{description} has invalid {key} coordinates.")
+        coordinates[key] = [
+            _finite_number(item, f"{description} {key} coordinate")
+            for item in point
+        ]
+    return {"type": kind, **coordinates}
 
 
 def mesh_from_dict(data: dict[str, Any]) -> FiniteVolumeMesh:
@@ -128,6 +228,81 @@ def mesh_from_dict(data: dict[str, Any]) -> FiniteVolumeMesh:
             raise MeshImportError(f"Face {face_id} references an invalid neighbour cell.")
         if (neighbour == NO_NEIGHBOUR) != (patch_id != NO_NEIGHBOUR):
             raise MeshImportError(f"Face {face_id} has inconsistent boundary data.")
+
+    raw_boundary_curves = data.get("boundary_curves")
+    face_curves: tuple[BoundaryCurve | None, ...] = ()
+    if raw_boundary_curves is not None:
+        if (
+            not isinstance(raw_boundary_curves, list)
+            or len(raw_boundary_curves) != len(faces)
+        ):
+            raise MeshImportError(
+                "Boundary curves must contain one entry per face."
+            )
+        parsed_curves = []
+        for face_id, raw_curve in enumerate(raw_boundary_curves):
+            if raw_curve is None:
+                parsed_curves.append(None)
+                continue
+            if not isinstance(raw_curve, dict):
+                raise MeshImportError(f"Boundary curve {face_id} must be an object.")
+            if face_neighbours[face_id] != NO_NEIGHBOUR:
+                raise MeshImportError(
+                    f"Internal face {face_id} cannot have a boundary curve."
+                )
+            patch_id = _integer(
+                raw_curve.get("patch_id"), f"Boundary curve {face_id} patch"
+            )
+            if patch_id != face_patch_ids[face_id]:
+                raise MeshImportError(
+                    f"Boundary curve {face_id} has an inconsistent patch."
+                )
+            raw_parameters = raw_curve.get("parameters")
+            if not isinstance(raw_parameters, list) or len(raw_parameters) != 2:
+                raise MeshImportError(
+                    f"Boundary curve {face_id} must have two parameters."
+                )
+            start_parameter, end_parameter = (
+                _finite_number(item, f"Boundary curve {face_id} parameter")
+                for item in raw_parameters
+            )
+            if not (
+                0.0 <= start_parameter <= 1.0
+                and 0.0 <= end_parameter <= 1.0
+                and start_parameter != end_parameter
+            ):
+                raise MeshImportError(
+                    f"Boundary curve {face_id} has invalid parameters."
+                )
+            geometry = _curve_geometry(
+                raw_curve.get("geometry"), f"Boundary curve {face_id}"
+            )
+            curve = BoundaryCurve(
+                geometry, start_parameter, end_parameter, patch_id
+            )
+            scale = max(
+                1.0,
+                *(abs(value) for point in faces[face_id] for value in points[point]),
+            )
+            tolerance = scale * 1.0e-8
+            for node_id, parameter in zip(
+                faces[face_id], (start_parameter, end_parameter)
+            ):
+                try:
+                    evaluated = evaluate_boundary_curve(geometry, parameter)
+                except (ArithmeticError, KeyError, TypeError, ValueError) as error:
+                    raise MeshImportError(
+                        f"Boundary curve {face_id} cannot be evaluated."
+                    ) from error
+                if any(
+                    abs(evaluated[axis] - points[node_id][axis]) > tolerance
+                    for axis in (0, 1)
+                ):
+                    raise MeshImportError(
+                        f"Boundary curve {face_id} does not match its face nodes."
+                    )
+            parsed_curves.append(curve)
+        face_curves = tuple(parsed_curves)
 
     cells = []
     stored_cell_face_ids = []
@@ -266,6 +441,7 @@ def mesh_from_dict(data: dict[str, Any]) -> FiniteVolumeMesh:
         cell_ids=tuple(cell_ids),
         cell_levels=tuple(cell_levels),
         refinement_records=tuple(records),
+        face_curves=face_curves,
     )
 
 
@@ -317,4 +493,20 @@ def mesh_to_dict(mesh: FiniteVolumeMesh) -> dict[str, Any]:
                 for record in mesh.refinement_records
             ],
         }
+    if mesh.face_curves:
+        if len(mesh.face_curves) != len(mesh.faces):
+            raise ValueError("Boundary curve metadata does not match mesh faces.")
+        data["boundary_curves"] = [
+            None
+            if curve is None
+            else {
+                "geometry": curve.geometry,
+                "parameters": [
+                    curve.start_parameter,
+                    curve.end_parameter,
+                ],
+                "patch_id": curve.patch_id,
+            }
+            for curve in mesh.face_curves
+        ]
     return data

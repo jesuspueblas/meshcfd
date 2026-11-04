@@ -35,7 +35,9 @@ gui (PyQt5)         io (JSON)
   using the last matching block and a configurable base state elsewhere.
   Powers accept `^` or `**`.
 - `meshcfd.io.mesh_io` reads MeshCAD's versioned 2D finite-volume mesh JSON
-  and preserves face, cell, and patch connectivity.
+  and preserves face, cell, patch connectivity, and optional parametric
+  boundary curves. Adaptive refinement evaluates those curves for new boundary
+  nodes and retains periodic patch matching.
 - `meshcfd.io.project_io` saves mesh references relative to the case file and
   loads them when opening a case. Cases without a source mesh file can still
   embed their mesh; versions 1 through 9 remain supported. Version 9 adds SST

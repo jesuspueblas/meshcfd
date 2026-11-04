@@ -808,13 +808,18 @@ def solve_case(
                         mesh, refine_marks, coarsen_parent_ids
                     )
                     if adapted is not mesh:
+                        new_areas = np.asarray(cell_areas(adapted), dtype=float)
                         conservative = _transfer_cell_values(
-                            conservative, old_areas, source_groups
+                            conservative,
+                            old_areas,
+                            new_areas,
+                            source_groups,
                         )
                         if turbulence_conservative is not None:
                             turbulence_conservative = _transfer_cell_values(
                                 turbulence_conservative,
                                 old_areas,
+                                new_areas,
                                 source_groups,
                             )
                         mesh = adapted
@@ -1522,6 +1527,7 @@ def _adaptation_indicator_values(
 def _transfer_cell_values(
     values: np.ndarray,
     old_areas: np.ndarray,
+    new_areas: np.ndarray,
     source_groups: tuple[tuple[int, ...], ...],
 ) -> np.ndarray:
     transferred = []
@@ -1531,7 +1537,17 @@ def _transfer_cell_values(
         transferred.append(
             np.average(values[indices], axis=0, weights=weights)
         )
-    return np.asarray(transferred, dtype=float)
+    transferred_values = np.asarray(transferred, dtype=float)
+    outputs_by_sources: dict[tuple[int, ...], list[int]] = {}
+    for output_id, source_group in enumerate(source_groups):
+        outputs_by_sources.setdefault(source_group, []).append(output_id)
+    for source_group, output_ids in outputs_by_sources.items():
+        old_area = float(np.sum(old_areas[np.asarray(source_group, dtype=int)]))
+        new_area = float(np.sum(new_areas[np.asarray(output_ids, dtype=int)]))
+        if not math.isfinite(new_area) or new_area <= 0.0:
+            raise ValueError("Adapted cells must have positive finite areas.")
+        transferred_values[output_ids] *= old_area / new_area
+    return transferred_values
 
 
 def _primitive_from_conservative(

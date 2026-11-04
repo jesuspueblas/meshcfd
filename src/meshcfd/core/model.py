@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 BOUNDARY_TYPES = (
     "Wall",
@@ -37,6 +38,14 @@ class MeshPatch:
 
 
 @dataclass(frozen=True)
+class BoundaryCurve:
+    geometry: dict[str, Any]
+    start_parameter: float
+    end_parameter: float
+    patch_id: int
+
+
+@dataclass(frozen=True)
 class RefinementRecord:
     parent_id: str
     child_ids: tuple[str, ...]
@@ -58,6 +67,7 @@ class FiniteVolumeMesh:
     cell_ids: tuple[str, ...] = ()
     cell_levels: tuple[int, ...] = ()
     refinement_records: tuple[RefinementRecord, ...] = ()
+    face_curves: tuple[BoundaryCurve | None, ...] = ()
 
 
 @dataclass

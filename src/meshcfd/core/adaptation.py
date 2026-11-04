@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import json
 import math
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 
 import numpy as np
 
-from meshcfd.core.model import Case, FiniteVolumeMesh, MeshPatch, RefinementRecord
+from meshcfd.core.curves import evaluate_boundary_curve
+from meshcfd.core.model import (
+    BoundaryCurve,
+    Case,
+    FiniteVolumeMesh,
+    MeshPatch,
+    RefinementRecord,
+)
 from meshcfd.core.periodic import match_periodic_faces
 
 _GEOMETRY_TOLERANCE = 1e-11
@@ -20,6 +28,7 @@ class _Leaf:
     level: int
     vertices: tuple[tuple[float, float], ...]
     source_cells: tuple[int, ...]
+    boundary_curves: tuple[BoundaryCurve | None, ...] = ()
 
 
 def select_adaptation(
@@ -202,6 +211,170 @@ def cell_areas(mesh: FiniteVolumeMesh) -> tuple[float, ...]:
     return tuple(abs(_signed_area([mesh.points[node] for node in cell])) for cell in mesh.cells)
 
 
+def _cell_boundary_curves(
+    mesh: FiniteVolumeMesh, cell_id: int
+) -> tuple[BoundaryCurve | None, ...]:
+    if not mesh.face_curves:
+        return ()
+    curve_by_face = {
+        tuple(sorted(mesh.faces[face_id])): (face_id, curve)
+        for face_id, curve in enumerate(mesh.face_curves)
+        if curve is not None
+    }
+    cell = mesh.cells[cell_id]
+    curves = []
+    for start, end in zip(cell, cell[1:] + cell[:1]):
+        match = curve_by_face.get(tuple(sorted((start, end))))
+        if match is None:
+            curves.append(None)
+            continue
+        face_id, curve = match
+        if mesh.faces[face_id] == (start, end):
+            curves.append(curve)
+        else:
+            curves.append(
+                BoundaryCurve(
+                    curve.geometry,
+                    curve.end_parameter,
+                    curve.start_parameter,
+                    curve.patch_id,
+                )
+            )
+    return tuple(curves)
+
+
+def _merge_boundary_curves(
+    vertices: tuple[tuple[float, float], ...], leaves: list[_Leaf]
+) -> tuple[BoundaryCurve | None, ...]:
+    grouped: dict[
+        tuple[str, int],
+        tuple[dict[str, object], dict[tuple[float, float], float]],
+    ] = {}
+    for leaf in leaves:
+        if len(leaf.boundary_curves) != len(leaf.vertices):
+            continue
+        for start, end, curve in zip(
+            leaf.vertices,
+            leaf.vertices[1:] + leaf.vertices[:1],
+            leaf.boundary_curves,
+        ):
+            if curve is None:
+                continue
+            key = (
+                json.dumps(curve.geometry, sort_keys=True, separators=(",", ":")),
+                curve.patch_id,
+            )
+            geometry, parameters = grouped.setdefault(
+                key, (curve.geometry, {})
+            )
+            parameters.setdefault(_point_key(start), curve.start_parameter)
+            parameters.setdefault(_point_key(end), curve.end_parameter)
+
+    merged = []
+    for start, end in zip(vertices, vertices[1:] + vertices[:1]):
+        start_key, end_key = _point_key(start), _point_key(end)
+        matches = [
+            (geometry, key[1], parameters)
+            for key, (geometry, parameters) in grouped.items()
+            if start_key in parameters and end_key in parameters
+        ]
+        if len(matches) != 1:
+            merged.append(None)
+            continue
+        geometry, patch_id, parameters = matches[0]
+        merged.append(
+            BoundaryCurve(
+                geometry,
+                parameters[start_key],
+                parameters[end_key],
+                patch_id,
+            )
+        )
+    return tuple(merged)
+
+
+def _child_boundary_curves(
+    vertices: tuple[tuple[float, float], ...],
+    curves: tuple[BoundaryCurve | None, ...],
+    children: tuple[tuple[tuple[float, float], ...], ...],
+) -> tuple[tuple[BoundaryCurve | None, ...], ...]:
+    if len(curves) != len(vertices):
+        return tuple(() for _ in children)
+    segments: dict[
+        tuple[tuple[float, float], tuple[float, float]],
+        tuple[dict[str, object], int, dict[tuple[float, float], float]],
+    ] = {}
+    for start, end, curve in zip(
+        vertices, vertices[1:] + vertices[:1], curves
+    ):
+        if curve is None:
+            continue
+        midpoint = _curve_midpoint(curve)
+        point_parameters = {
+            _point_key(start): curve.start_parameter,
+            _point_key(midpoint): 0.5
+            * (curve.start_parameter + curve.end_parameter),
+            _point_key(end): curve.end_parameter,
+        }
+        segments[_edge_key(start, end)] = (
+            curve.geometry,
+            curve.patch_id,
+            point_parameters,
+        )
+
+    child_curves = []
+    for child in children:
+        child_edges = []
+        for start, end in zip(child, child[1:] + child[:1]):
+            found = None
+            start_key, end_key = _point_key(start), _point_key(end)
+            for geometry, patch_id, parameters in segments.values():
+                if start_key in parameters and end_key in parameters:
+                    found = BoundaryCurve(
+                        geometry,
+                        parameters[start_key],
+                        parameters[end_key],
+                        patch_id,
+                    )
+                    break
+            child_edges.append(found)
+        child_curves.append(tuple(child_edges))
+    return tuple(child_curves)
+
+
+def _curve_midpoint(curve: BoundaryCurve) -> tuple[float, float]:
+    return evaluate_boundary_curve(
+        curve.geometry, 0.5 * (curve.start_parameter + curve.end_parameter)
+    )
+
+
+def _has_curved_boundary(
+    vertices: tuple[tuple[float, float], ...],
+    curves: dict[
+        tuple[tuple[float, float], tuple[float, float]], BoundaryCurve
+    ],
+) -> bool:
+    for start, end in zip(vertices, vertices[1:] + vertices[:1]):
+        curve = curves.get(_edge_key(start, end))
+        if curve is None:
+            continue
+        curve_midpoint = _curve_midpoint(curve)
+        chord_midpoint = (
+            0.5 * (start[0] + end[0]),
+            0.5 * (start[1] + end[1]),
+        )
+        scale = max(1.0, *(abs(value) for point in (start, end) for value in point))
+        if _distance_squared(curve_midpoint, chord_midpoint) > (scale * 1e-12) ** 2:
+            return True
+    return False
+
+
+def _edge_key(
+    start: tuple[float, float], end: tuple[float, float]
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    return tuple(sorted((_point_key(start), _point_key(end))))
+
+
 def adapt_mesh(
     mesh: FiniteVolumeMesh,
     refine_marks: dict[int, str],
@@ -222,6 +395,7 @@ def adapt_mesh(
             cell_levels[index],
             tuple(mesh.points[node] for node in cell),
             (index,),
+            _cell_boundary_curves(mesh, index),
         )
         for index, cell in enumerate(mesh.cells)
     ]
@@ -242,6 +416,7 @@ def adapt_mesh(
             record.level,
             record.vertices,
             tuple(index for leaf in child_leaves for index in leaf.source_cells),
+            _merge_boundary_curves(record.vertices, child_leaves),
         )
         for key in tuple(records):
             if key == parent_id or key.startswith(parent_id + "."):
@@ -259,17 +434,22 @@ def adapt_mesh(
         if axis is None:
             leaves.append(leaf)
             continue
-        children = _split_polygon(leaf.vertices, axis)
+        children = _split_polygon(leaf.vertices, axis, leaf.boundary_curves)
         if len(children) < 2:
             leaves.append(leaf)
             continue
+        child_curves = _child_boundary_curves(
+            leaf.vertices, leaf.boundary_curves, children
+        )
         child_ids = tuple(f"{leaf.cell_id}.{child}" for child in range(len(children)))
         new_records.append(
             RefinementRecord(leaf.cell_id, child_ids, leaf.vertices, leaf.level)
         )
         leaves.extend(
-            _Leaf(child_id, leaf.level + 1, polygon, leaf.source_cells)
-            for child_id, polygon in zip(child_ids, children)
+            _Leaf(child_id, leaf.level + 1, polygon, leaf.source_cells, curves)
+            for child_id, polygon, curves in zip(
+                child_ids, children, child_curves
+            )
         )
 
     if not coarsened_children and not new_records:
@@ -280,17 +460,33 @@ def adapt_mesh(
 
 
 def _split_polygon(
-    polygon: tuple[tuple[float, float], ...], axis: str
+    polygon: tuple[tuple[float, float], ...],
+    axis: str,
+    boundary_curves: tuple[BoundaryCurve | None, ...] = (),
 ) -> tuple[tuple[tuple[float, float], ...], ...]:
     corners = _remove_collinear_vertices(polygon)
     if len(corners) == 4:
+        curve_by_edge = {
+            _edge_key(first, second): curve
+            for first, second, curve in zip(
+                polygon,
+                polygon[1:] + polygon[:1],
+                boundary_curves
+                if len(boundary_curves) == len(polygon)
+                else (None,) * len(polygon),
+            )
+            if curve is not None
+        }
         edge_midpoints = tuple(
-            (
+            _curve_midpoint(curve_by_edge.get(_edge_key(first, second)))
+            if _edge_key(first, second) in curve_by_edge
+            else (
                 0.5 * (first[0] + second[0]),
                 0.5 * (first[1] + second[1]),
             )
             for first, second in zip(corners, corners[1:] + corners[:1])
         )
+        has_curved_boundary = _has_curved_boundary(corners, curve_by_edge)
         if axis in ("x", "y"):
             opposite_pairs = ((0, 2), (1, 3))
             coordinate = 1 if axis == "x" else 0
@@ -314,7 +510,9 @@ def _split_polygon(
                 index = (index + 1) % 4
             second_half.append(edge_midpoints[first_edge])
             pieces = (tuple(first_half), tuple(second_half))
-            return _validate_split_area(corners, pieces)
+            return _validate_split_area(
+                corners, pieces, allow_curved_boundary=has_curved_boundary
+            )
         if axis == "xy":
             center = (
                 sum(point[0] for point in corners) / 4.0,
@@ -329,7 +527,9 @@ def _split_polygon(
                 )
                 for index in range(4)
             )
-            return _validate_split_area(corners, pieces)
+            return _validate_split_area(
+                corners, pieces, allow_curved_boundary=has_curved_boundary
+            )
 
     xs = [point[0] for point in polygon]
     ys = [point[1] for point in polygon]
@@ -373,9 +573,19 @@ def _split_polygon(
 def _validate_split_area(
     parent: tuple[tuple[float, float], ...],
     pieces: tuple[tuple[tuple[float, float], ...], ...],
+    *,
+    allow_curved_boundary: bool = False,
 ) -> tuple[tuple[tuple[float, float], ...], ...]:
     parent_area = abs(_signed_area(list(parent)))
     child_area = sum(abs(_signed_area(list(piece))) for piece in pieces)
+    if allow_curved_boundary:
+        orientation = math.copysign(1.0, _signed_area(list(parent)))
+        if any(
+            _signed_area(list(piece)) * orientation <= 1e-14
+            for piece in pieces
+        ):
+            raise ValueError("Curved boundary splitting produced an invalid cell.")
+        return pieces
     if not math.isclose(
         parent_area, child_area, rel_tol=1e-10, abs_tol=max(parent_area, 1.0) * 1e-12
     ):
@@ -488,6 +698,7 @@ def _rebuild_mesh(
     cell_faces: list[tuple[int, ...]] = []
     cell_signs: list[tuple[int, ...]] = []
     cell_vertices: list[tuple[int, ...]] = []
+    face_curves: list[BoundaryCurve | None] = []
     edge_to_face: dict[tuple[int, int], int] = {}
 
     def point_id(point: tuple[float, float]) -> int:
@@ -501,7 +712,15 @@ def _rebuild_mesh(
         face_ids = []
         signs = []
         loop = []
-        for start, end in zip(leaf.vertices, leaf.vertices[1:] + leaf.vertices[:1]):
+        leaf_curves = (
+            leaf.boundary_curves
+            if len(leaf.boundary_curves) == len(leaf.vertices)
+            else (None,) * len(leaf.vertices)
+        )
+        for edge_index, (start, end) in enumerate(
+            zip(leaf.vertices, leaf.vertices[1:] + leaf.vertices[:1])
+        ):
+            boundary_curve = leaf_curves[edge_index]
             axis_span = 0 if abs(end[0] - start[0]) >= abs(end[1] - start[1]) else 1
             ordered_points = sorted_x if axis_span == 0 else sorted_y
             coordinates = x_coordinates if axis_span == 0 else y_coordinates
@@ -529,13 +748,40 @@ def _rebuild_mesh(
                     faces.append((first_id, second_id))
                     owners.append(cell_id)
                     neighbours.append(-1)
-                    patch_ids.append(_boundary_patch(first, second, boundary_edges))
+                    if boundary_curve is None:
+                        patch_ids.append(
+                            _boundary_patch(first, second, boundary_edges)
+                        )
+                        face_curves.append(None)
+                    else:
+                        parameter_start = _segment_parameter(first, start, end)
+                        parameter_end = _segment_parameter(second, start, end)
+                        patch_ids.append(boundary_curve.patch_id)
+                        face_curves.append(
+                            BoundaryCurve(
+                                boundary_curve.geometry,
+                                boundary_curve.start_parameter
+                                + parameter_start
+                                * (
+                                    boundary_curve.end_parameter
+                                    - boundary_curve.start_parameter
+                                ),
+                                boundary_curve.start_parameter
+                                + parameter_end
+                                * (
+                                    boundary_curve.end_parameter
+                                    - boundary_curve.start_parameter
+                                ),
+                                boundary_curve.patch_id,
+                            )
+                        )
                     sign = 1
                 else:
                     if neighbours[face_id] >= 0:
                         raise ValueError("Adaptation produced a non-manifold face.")
                     neighbours[face_id] = cell_id
                     patch_ids[face_id] = -1
+                    face_curves[face_id] = None
                     sign = 1 if faces[face_id] == (first_id, second_id) else -1
                 face_ids.append(face_id)
                 signs.append(sign)
@@ -568,6 +814,11 @@ def _rebuild_mesh(
         cell_ids=tuple(leaf.cell_id for leaf in leaves),
         cell_levels=tuple(leaf.level for leaf in leaves),
         refinement_records=records,
+        face_curves=(
+            tuple(face_curves)
+            if any(curve is not None for curve in face_curves)
+            else ()
+        ),
     )
 
 
