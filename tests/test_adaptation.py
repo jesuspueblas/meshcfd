@@ -139,3 +139,51 @@ def test_nested_refinement_can_be_coarsened_to_the_original_cell():
     assert max(restored.cell_levels) == 0
     assert restored.refinement_records == ()
     assert sum(cell_areas(restored)) == pytest.approx(sum(cell_areas(original)))
+
+
+def test_refinement_propagates_to_restore_two_to_one_balance():
+    original = two_cell_mesh()
+    once_refined, _ = adapt_mesh(original, {0: "xy"}, set())
+
+    refined, _ = adapt_mesh(once_refined, {0: "xy"}, set())
+
+    levels = refined.cell_levels
+    assert max(levels) == 2
+    assert any(level == 1 for level in levels)
+    assert all(
+        abs(levels[owner] - levels[neighbour]) <= 1
+        for owner, neighbour in zip(
+            refined.face_owners, refined.face_neighbours
+        )
+        if neighbour >= 0
+    )
+
+
+def test_refinement_does_not_coarsen_a_cell_into_a_two_to_one_violation():
+    original = two_cell_mesh()
+    refined, _ = adapt_mesh(original, {0: "xy", 1: "xy"}, set())
+    cell_index = {cell_id: index for index, cell_id in enumerate(refined.cell_ids)}
+    target = next(
+        first
+        for face_id, neighbour in enumerate(refined.face_neighbours)
+        if neighbour >= 0
+        for first, second in (
+            (refined.face_owners[face_id], neighbour),
+            (neighbour, refined.face_owners[face_id]),
+        )
+        if refined.cell_ids[first].startswith("r1.")
+        and refined.cell_ids[second].startswith("r0.")
+    )
+    target = cell_index[refined.cell_ids[target]]
+
+    adapted, _ = adapt_mesh(refined, {target: "xy"}, {"r0"})
+
+    assert any(cell_id.startswith("r0.") for cell_id in adapted.cell_ids)
+    assert max(adapted.cell_levels) == 2
+    assert all(
+        abs(adapted.cell_levels[owner] - adapted.cell_levels[neighbour]) <= 1
+        for owner, neighbour in zip(
+            adapted.face_owners, adapted.face_neighbours
+        )
+        if neighbour >= 0
+    )

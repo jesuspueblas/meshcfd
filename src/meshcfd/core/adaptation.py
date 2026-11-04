@@ -168,43 +168,128 @@ def select_adaptation(
         if any(level > parent_level + 1 for level in neighbor_levels):
             coarsen_parent_ids.discard(parent_id)
 
+    _balance_adaptation_plan(
+        refine_marks,
+        coarsen_parent_ids,
+        neighbors,
+        cell_ids,
+        levels,
+        maximum_level,
+        mesh.refinement_records,
+        periodic_cell_pairs,
+    )
+
+    return refine_marks, coarsen_parent_ids
+
+
+def _balance_adaptation_plan(
+    refine_marks: dict[int, str],
+    coarsen_parent_ids: set[str],
+    neighbors: list[set[int]],
+    cell_ids: tuple[str, ...],
+    levels: tuple[int, ...],
+    maximum_level: int,
+    refinement_records: tuple[RefinementRecord, ...],
+    periodic_cell_pairs: list[tuple[int, int, tuple[float, float]]],
+) -> None:
+    """Make the projected refine/coarsen plan 2:1 balanced and periodic-compatible."""
+    records_by_parent = {
+        record.parent_id: record for record in refinement_records
+    }
+    parent_by_child = {
+        child_id: record.parent_id
+        for record in refinement_records
+        for child_id in record.child_ids
+    }
+
     changed = True
     while changed:
         changed = False
-        for cell_id in tuple(refine_marks):
-            for neighbor in neighbors[cell_id]:
-                if levels[neighbor] < levels[cell_id] and levels[neighbor] < maximum_level:
-                    if neighbor not in refine_marks:
-                        refine_marks[neighbor] = "xy"
-                        changed = True
         for cell_a, cell_b, _shift in periodic_cell_pairs:
             if cell_a in refine_marks and cell_b not in refine_marks:
                 if levels[cell_b] >= maximum_level:
                     del refine_marks[cell_a]
-                    changed = True
-                    continue
-                refine_marks[cell_b] = refine_marks[cell_a]
+                else:
+                    refine_marks[cell_b] = refine_marks[cell_a]
                 changed = True
             elif cell_b in refine_marks and cell_a not in refine_marks:
                 if levels[cell_a] >= maximum_level:
                     del refine_marks[cell_b]
-                    changed = True
-                    continue
-                refine_marks[cell_a] = refine_marks[cell_b]
+                else:
+                    refine_marks[cell_a] = refine_marks[cell_b]
                 changed = True
             elif (
                 cell_a in refine_marks
                 and cell_b in refine_marks
                 and refine_marks[cell_a] != refine_marks[cell_b]
             ):
-                if (
-                    refine_marks[cell_a] != "xy"
-                    or refine_marks[cell_b] != "xy"
-                ):
+                if refine_marks[cell_a] != "xy" or refine_marks[cell_b] != "xy":
                     refine_marks[cell_a] = refine_marks[cell_b] = "xy"
                     changed = True
 
-    return refine_marks, coarsen_parent_ids
+        projected_levels = []
+        for cell_id_index, (cell_id, level) in enumerate(zip(cell_ids, levels)):
+            parent_id = parent_by_child.get(cell_id)
+            if parent_id in coarsen_parent_ids:
+                projected_levels.append(records_by_parent[parent_id].level)
+            else:
+                projected_levels.append(level + int(cell_id_index in refine_marks))
+        for cell_id_index, _cell_id in enumerate(cell_ids):
+            for neighbor in neighbors[cell_id_index]:
+                if neighbor <= cell_id_index:
+                    continue
+                difference = (
+                    projected_levels[cell_id_index] - projected_levels[neighbor]
+                )
+                if abs(difference) <= 1:
+                    continue
+                lower = cell_id_index if difference < 0 else neighbor
+                higher = neighbor if difference < 0 else cell_id_index
+                parent_id = parent_by_child.get(cell_ids[lower])
+                if parent_id in coarsen_parent_ids:
+                    coarsen_parent_ids.remove(parent_id)
+                elif lower in refine_marks:
+                    if higher in refine_marks:
+                        del refine_marks[higher]
+                    else:
+                        raise ValueError(
+                            "The current mesh cannot satisfy 2:1 refinement "
+                            "balance in one adaptation step."
+                        )
+                elif levels[lower] < maximum_level:
+                    refine_marks[lower] = "xy"
+                elif higher in refine_marks:
+                    del refine_marks[higher]
+                else:
+                    raise ValueError(
+                        "The current mesh cannot satisfy 2:1 refinement balance "
+                        "within the configured maximum level."
+                    )
+                changed = True
+                break
+            if changed:
+                break
+
+    for cell_id, adjacent in enumerate(neighbors):
+        for neighbor in adjacent:
+            if neighbor <= cell_id:
+                continue
+            parent_id = parent_by_child.get(cell_ids[cell_id])
+            level = (
+                records_by_parent[parent_id].level
+                if parent_id in coarsen_parent_ids
+                else levels[cell_id] + int(cell_id in refine_marks)
+            )
+            parent_id = parent_by_child.get(cell_ids[neighbor])
+            neighbour_level = (
+                records_by_parent[parent_id].level
+                if parent_id in coarsen_parent_ids
+                else levels[neighbor] + int(neighbor in refine_marks)
+            )
+            if abs(level - neighbour_level) > 1:
+                raise ValueError(
+                    "The projected adaptive mesh violates 2:1 refinement balance."
+                )
 
 
 def cell_areas(mesh: FiniteVolumeMesh) -> tuple[float, ...]:
@@ -388,6 +473,30 @@ def adapt_mesh(
     if len(cell_ids) != len(mesh.cells) or len(cell_levels) != len(mesh.cells):
         raise ValueError("Mesh refinement metadata does not match its cells.")
 
+    refine_marks = dict(refine_marks)
+    coarsen_parent_ids = set(coarsen_parent_ids)
+    neighbours: list[set[int]] = [set() for _ in mesh.cells]
+    for face_id, neighbour in enumerate(mesh.face_neighbours):
+        if neighbour < 0:
+            continue
+        owner = mesh.face_owners[face_id]
+        neighbours[owner].add(neighbour)
+        neighbours[neighbour].add(owner)
+    maximum_level = max(
+        (*cell_levels, *(cell_levels[cell_id] + 1 for cell_id in refine_marks)),
+        default=0,
+    )
+    _balance_adaptation_plan(
+        refine_marks,
+        coarsen_parent_ids,
+        neighbours,
+        cell_ids,
+        cell_levels,
+        maximum_level,
+        mesh.refinement_records,
+        [],
+    )
+
     records = {record.parent_id: record for record in mesh.refinement_records}
     old_leaves = [
         _Leaf(
@@ -456,7 +565,20 @@ def adapt_mesh(
         return mesh, tuple((index,) for index in range(len(mesh.cells)))
 
     rebuilt = _rebuild_mesh(mesh, leaves, tuple(records.values()) + tuple(new_records))
+    _validate_two_to_one(rebuilt)
     return rebuilt, tuple(leaf.source_cells for leaf in leaves)
+
+
+def _validate_two_to_one(mesh: FiniteVolumeMesh) -> None:
+    levels = mesh.cell_levels or (0,) * len(mesh.cells)
+    for face_id, neighbour in enumerate(mesh.face_neighbours):
+        if neighbour < 0:
+            continue
+        owner = mesh.face_owners[face_id]
+        if abs(levels[owner] - levels[neighbour]) > 1:
+            raise ValueError(
+                f"Adapted face {face_id} violates the 2:1 refinement balance."
+            )
 
 
 def _split_polygon(
