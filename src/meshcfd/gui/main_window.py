@@ -1123,6 +1123,8 @@ class MainWindow(QMainWindow):
             self._log_output("Solver resumed.")
 
     def _on_solver_progress(self, progress: SolverProgress) -> None:
+        if progress.warning is not None:
+            self._log_output(progress.warning, "WARNING")
         if progress.residuals:
             density, momentum_x, momentum_y, energy = progress.residuals[:4]
             self._convergence_history.append(

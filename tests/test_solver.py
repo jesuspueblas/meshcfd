@@ -4,6 +4,7 @@ from threading import Event, Thread
 import numpy as np
 import pytest
 
+from meshcfd.core.adaptation import AdaptationBalanceError
 from meshcfd.core.euler import (
     numerical_flux,
     physical_flux,
@@ -383,6 +384,49 @@ def test_solver_adapts_mesh_at_configured_gradient_interval():
         state.density * area
         for state, area in zip(result.states, _build_geometry(case.mesh, case).areas)
     ) == pytest.approx(1.5)
+
+
+def test_solver_continues_when_adaptation_cannot_balance_mesh(monkeypatch):
+    case = make_periodic_case(2, 1)
+    case.periodic_pairs.clear()
+    for boundary in case.boundary_conditions:
+        boundary.kind = "Wall"
+    case.numerics.reconstruction = "First order"
+    case.numerics.time_integration = "Explicit Euler"
+    case.numerics.max_iterations = 2
+    case.numerics.end_time = 1.0
+    case.numerics.adaptive_mesh = True
+    case.numerics.adaptation_interval = 1
+    case.numerics.adaptation_refine_threshold = 0.01
+
+    attempts = []
+
+    def reject_adaptation(*_args, **_kwargs):
+        attempts.append(None)
+        raise AdaptationBalanceError(
+            "The current mesh cannot satisfy anisotropic transition balance."
+        )
+
+    monkeypatch.setattr("meshcfd.core.solver.select_adaptation", reject_adaptation)
+    progress = []
+
+    result = solve_case(
+        case,
+        (
+            InitialState(density=1.0, pressure=1.0),
+            InitialState(density=2.0, pressure=1.0),
+        ),
+        progress_callback=progress.append,
+    )
+
+    assert result.steps == 2
+    assert len(attempts) == 1
+    assert len(case.mesh.cells) == 2
+    assert any(
+        item.warning is not None
+        and "Adaptive mesh disabled" in item.warning
+        for item in progress
+    )
 
 
 def test_adaptation_keeps_periodic_face_subdivisions_matching():

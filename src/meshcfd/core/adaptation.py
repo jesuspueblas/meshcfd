@@ -22,6 +22,10 @@ from meshcfd.core.periodic import match_periodic_faces
 _GEOMETRY_TOLERANCE = 1e-11
 
 
+class AdaptationBalanceError(ValueError):
+    """Raised when a refinement plan cannot satisfy mesh balance constraints."""
+
+
 @dataclass(frozen=True)
 class _Leaf:
     cell_id: str
@@ -174,6 +178,8 @@ def select_adaptation(
         neighbors,
         cell_ids,
         levels,
+        _cell_directional_levels(mesh, cell_ids, mesh.refinement_records),
+        _parent_directional_levels(mesh.refinement_records),
         maximum_level,
         mesh.refinement_records,
         periodic_cell_pairs,
@@ -182,17 +188,46 @@ def select_adaptation(
     return refine_marks, coarsen_parent_ids
 
 
+def _least_disruptive_refinement_axis(
+    cell_index: int,
+    neighbors: list[set[int]],
+    projected_directional_levels: list[tuple[int, int]],
+    directional_levels: tuple[tuple[int, int], ...],
+) -> int:
+    projected = projected_directional_levels[cell_index]
+
+    def directional_cost(axis_index: int) -> tuple[int, int, int]:
+        jumps = [
+            abs(
+                projected[coordinate]
+                + int(coordinate == axis_index)
+                - projected_directional_levels[adjacent][coordinate]
+            )
+            for adjacent in neighbors[cell_index]
+            for coordinate in (0, 1)
+        ]
+        return (
+            max(jumps),
+            sum(jumps),
+            directional_levels[cell_index][axis_index],
+        )
+
+    return min((0, 1), key=directional_cost)
+
+
 def _balance_adaptation_plan(
     refine_marks: dict[int, str],
     coarsen_parent_ids: set[str],
     neighbors: list[set[int]],
     cell_ids: tuple[str, ...],
     levels: tuple[int, ...],
+    directional_levels: tuple[tuple[int, int], ...],
+    parent_directional_levels: dict[str, tuple[int, int]],
     maximum_level: int,
     refinement_records: tuple[RefinementRecord, ...],
     periodic_cell_pairs: list[tuple[int, int, tuple[float, float]]],
 ) -> None:
-    """Make the projected refine/coarsen plan 2:1 balanced and periodic-compatible."""
+    """Limit level and directional-size jumps in the projected mesh."""
     records_by_parent = {
         record.parent_id: record for record in refinement_records
     }
@@ -202,8 +237,17 @@ def _balance_adaptation_plan(
         for child_id in record.child_ids
     }
 
+    seen_plan_signatures: set[int] = set()
     changed = True
     while changed:
+        plan_signature = hash(
+            (frozenset(refine_marks.items()), frozenset(coarsen_parent_ids))
+        )
+        if plan_signature in seen_plan_signatures:
+            raise AdaptationBalanceError(
+                "The adaptive refinement plan cycles while balancing mesh transitions."
+            )
+        seen_plan_signatures.add(plan_signature)
         changed = False
         for cell_a, cell_b, _shift in periodic_cell_pairs:
             if cell_a in refine_marks and cell_b not in refine_marks:
@@ -228,12 +272,24 @@ def _balance_adaptation_plan(
                     changed = True
 
         projected_levels = []
+        projected_directional_levels = []
         for cell_id_index, (cell_id, level) in enumerate(zip(cell_ids, levels)):
             parent_id = parent_by_child.get(cell_id)
             if parent_id in coarsen_parent_ids:
                 projected_levels.append(records_by_parent[parent_id].level)
+                projected_directional_levels.append(
+                    parent_directional_levels[parent_id]
+                )
             else:
                 projected_levels.append(level + int(cell_id_index in refine_marks))
+                mark = refine_marks.get(cell_id_index, "")
+                projected_directional_levels.append(
+                    (
+                        directional_levels[cell_id_index][0] + int("x" in mark),
+                        directional_levels[cell_id_index][1] + int("y" in mark),
+                    )
+                )
+
         for cell_id_index, _cell_id in enumerate(cell_ids):
             for neighbor in neighbors[cell_id_index]:
                 if neighbor <= cell_id_index:
@@ -241,32 +297,80 @@ def _balance_adaptation_plan(
                 difference = (
                     projected_levels[cell_id_index] - projected_levels[neighbor]
                 )
-                if abs(difference) <= 1:
-                    continue
-                lower = cell_id_index if difference < 0 else neighbor
-                higher = neighbor if difference < 0 else cell_id_index
-                parent_id = parent_by_child.get(cell_ids[lower])
-                if parent_id in coarsen_parent_ids:
-                    coarsen_parent_ids.remove(parent_id)
-                elif lower in refine_marks:
-                    if higher in refine_marks:
+                if abs(difference) > 1:
+                    lower = cell_id_index if difference < 0 else neighbor
+                    higher = neighbor if difference < 0 else cell_id_index
+                    parent_id = parent_by_child.get(cell_ids[lower])
+                    if parent_id in coarsen_parent_ids:
+                        coarsen_parent_ids.remove(parent_id)
+                    elif lower in refine_marks:
+                        if higher in refine_marks:
+                            del refine_marks[higher]
+                        else:
+                            raise AdaptationBalanceError(
+                                "The current mesh cannot satisfy 2:1 refinement "
+                                "balance in one adaptation step."
+                            )
+                    elif levels[lower] < maximum_level:
+                        axis_index = _least_disruptive_refinement_axis(
+                            lower,
+                            neighbors,
+                            projected_directional_levels,
+                            directional_levels,
+                        )
+                        refine_marks[lower] = ("x", "y")[axis_index]
+                    elif higher in refine_marks:
                         del refine_marks[higher]
                     else:
-                        raise ValueError(
-                            "The current mesh cannot satisfy 2:1 refinement "
-                            "balance in one adaptation step."
+                        raise AdaptationBalanceError(
+                            "The current mesh cannot satisfy 2:1 refinement balance "
+                            "within the configured maximum level."
                         )
-                elif levels[lower] < maximum_level:
-                    refine_marks[lower] = "xy"
-                elif higher in refine_marks:
-                    del refine_marks[higher]
-                else:
-                    raise ValueError(
-                        "The current mesh cannot satisfy 2:1 refinement balance "
-                        "within the configured maximum level."
+                    changed = True
+                    break
+
+                for axis_index, axis in enumerate(("x", "y")):
+                    difference = (
+                        projected_directional_levels[cell_id_index][axis_index]
+                        - projected_directional_levels[neighbor][axis_index]
                     )
-                changed = True
-                break
+                    if abs(difference) <= 1:
+                        continue
+                    lower = cell_id_index if difference < 0 else neighbor
+                    higher = neighbor if difference < 0 else cell_id_index
+                    parent_id = parent_by_child.get(cell_ids[lower])
+                    if parent_id in coarsen_parent_ids:
+                        coarsen_parent_ids.remove(parent_id)
+                    elif lower in refine_marks:
+                        current_axes = set(refine_marks[lower])
+                        if axis in current_axes:
+                            if higher in refine_marks:
+                                del refine_marks[higher]
+                            else:
+                                raise AdaptationBalanceError(
+                                    "The current mesh cannot satisfy anisotropic "
+                                    "transition balance in one adaptation step."
+                                )
+                        else:
+                            current_axes.add(axis)
+                            refine_marks[lower] = (
+                                "xy"
+                                if len(current_axes) == 2
+                                else next(iter(current_axes))
+                            )
+                    elif levels[lower] < maximum_level:
+                        refine_marks[lower] = axis
+                    elif higher in refine_marks:
+                        del refine_marks[higher]
+                    else:
+                        raise AdaptationBalanceError(
+                            "The current mesh cannot satisfy anisotropic transition "
+                            "balance within the configured maximum level."
+                        )
+                    changed = True
+                    break
+                if changed:
+                    break
             if changed:
                 break
 
@@ -287,9 +391,78 @@ def _balance_adaptation_plan(
                 else levels[neighbor] + int(neighbor in refine_marks)
             )
             if abs(level - neighbour_level) > 1:
-                raise ValueError(
+                raise AdaptationBalanceError(
                     "The projected adaptive mesh violates 2:1 refinement balance."
                 )
+            if any(
+                abs(first - second) > 1
+                for first, second in zip(
+                    projected_directional_levels[cell_id],
+                    projected_directional_levels[neighbor],
+                )
+            ):
+                raise AdaptationBalanceError(
+                    "The projected adaptive mesh violates anisotropic transition "
+                    "balance."
+                )
+
+
+def _cell_directional_levels(
+    mesh: FiniteVolumeMesh,
+    cell_ids: tuple[str, ...],
+    refinement_records: tuple[RefinementRecord, ...],
+) -> tuple[tuple[int, int], ...]:
+    root_vertices = {
+        record.parent_id: record.vertices
+        for record in refinement_records
+        if "." not in record.parent_id
+    }
+    result = []
+    for cell_id, cell in zip(cell_ids, mesh.cells):
+        root_id = cell_id.split(".", 1)[0]
+        base_vertices = root_vertices.get(
+            root_id, tuple(mesh.points[node] for node in cell)
+        )
+        vertices = tuple(mesh.points[node] for node in cell)
+        result.append(_directional_refinement_levels(vertices, base_vertices))
+    return tuple(result)
+
+
+def _parent_directional_levels(
+    refinement_records: tuple[RefinementRecord, ...],
+) -> dict[str, tuple[int, int]]:
+    root_vertices = {
+        record.parent_id: record.vertices
+        for record in refinement_records
+        if "." not in record.parent_id
+    }
+    result = {}
+    for record in refinement_records:
+        root_id = record.parent_id.split(".", 1)[0]
+        base_vertices = root_vertices.get(root_id, record.vertices)
+        result[record.parent_id] = _directional_refinement_levels(
+            record.vertices, base_vertices
+        )
+    return result
+
+
+def _directional_refinement_levels(
+    vertices: tuple[tuple[float, float], ...],
+    base_vertices: tuple[tuple[float, float], ...],
+) -> tuple[int, int]:
+    levels = []
+    for axis in (0, 1):
+        current_span = max(point[axis] for point in vertices) - min(
+            point[axis] for point in vertices
+        )
+        base_span = max(point[axis] for point in base_vertices) - min(
+            point[axis] for point in base_vertices
+        )
+        if current_span <= _GEOMETRY_TOLERANCE or base_span <= _GEOMETRY_TOLERANCE:
+            levels.append(0)
+        else:
+            levels.append(max(0, round(math.log2(base_span / current_span))))
+    return levels[0], levels[1]
 
 
 def cell_areas(mesh: FiniteVolumeMesh) -> tuple[float, ...]:
@@ -492,6 +665,8 @@ def adapt_mesh(
         neighbours,
         cell_ids,
         cell_levels,
+        _cell_directional_levels(mesh, cell_ids, mesh.refinement_records),
+        _parent_directional_levels(mesh.refinement_records),
         maximum_level,
         mesh.refinement_records,
         [],

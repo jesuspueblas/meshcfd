@@ -1,6 +1,12 @@
 import pytest
 
-from meshcfd.core.adaptation import _split_polygon, adapt_mesh, cell_areas
+from meshcfd.core.adaptation import (
+    _balance_adaptation_plan,
+    _cell_directional_levels,
+    _split_polygon,
+    adapt_mesh,
+    cell_areas,
+)
 from meshcfd.io.mesh_io import mesh_from_dict, mesh_to_dict
 
 
@@ -187,3 +193,63 @@ def test_refinement_does_not_coarsen_a_cell_into_a_two_to_one_violation():
         )
         if neighbour >= 0
     )
+
+
+def test_anisotropic_refinement_limits_directional_transition_between_neighbours():
+    original = two_cell_mesh()
+    differently_refined, _ = adapt_mesh(original, {0: "x", 1: "y"}, set())
+    target, neighbour = next(
+        (left, right)
+        for face_id, right in enumerate(differently_refined.face_neighbours)
+        if right >= 0
+        for left in (differently_refined.face_owners[face_id],)
+        if differently_refined.cell_ids[left].startswith("r0.")
+        and differently_refined.cell_ids[right].startswith("r1.")
+    )
+    neighbour_id = differently_refined.cell_ids[neighbour]
+
+    adapted, _ = adapt_mesh(differently_refined, {target: "x"}, set())
+
+    assert any(cell_id.startswith(neighbour_id + ".") for cell_id in adapted.cell_ids)
+    directional_levels = _cell_directional_levels(
+        adapted, adapted.cell_ids, adapted.refinement_records
+    )
+    assert all(
+        abs(directional_levels[owner][axis] - directional_levels[neighbour][axis]) <= 1
+        for face_id, neighbour in enumerate(adapted.face_neighbours)
+        if neighbour >= 0
+        for owner in (adapted.face_owners[face_id],)
+        for axis in (0, 1)
+    )
+
+
+def test_anisotropic_transition_uses_each_original_cells_shape_as_its_baseline():
+    original = two_cell_mesh()
+    original.points = tuple(
+        (2.0 * x if x <= 1.0 else x + 1.0, y)
+        for x, y in original.points
+    )
+
+    refined, _ = adapt_mesh(original, {0: "y"}, set())
+
+    assert len(refined.cells) == 3
+    assert any(cell_id.startswith("r1") for cell_id in refined.cell_ids)
+
+
+def test_two_to_one_balance_chooses_axis_that_avoids_anisotropic_plan_cycle():
+    refine_marks = {1: "x"}
+
+    _balance_adaptation_plan(
+        refine_marks,
+        set(),
+        [{1}, {0}],
+        ("r0", "r1"),
+        (2, 3),
+        ((2, 1), (0, 0)),
+        {},
+        4,
+        (),
+        [],
+    )
+
+    assert refine_marks == {0: "y", 1: "xy"}

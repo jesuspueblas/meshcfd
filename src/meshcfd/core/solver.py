@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass, replace
 from time import thread_time
 from typing import Callable
@@ -17,6 +18,7 @@ from scipy.sparse.linalg import (
 )
 
 from meshcfd.core.adaptation import (
+    AdaptationBalanceError,
     adapt_mesh,
     cell_areas,
     select_adaptation,
@@ -50,6 +52,7 @@ class SolverProgress:
     states: tuple[InitialState, ...] | None = None
     mesh: FiniteVolumeMesh | None = None
     cpu_time: float = 0.0
+    warning: str | None = None
 
 
 @dataclass(frozen=True)
@@ -405,6 +408,7 @@ def solve_case(
     time = start_time
     completed = False
     steps = step_offset
+    adaptation_disabled = False
     for local_step in range(1, settings.max_iterations + 1):
         step = step_offset + local_step
         if pause_callback is not None:
@@ -783,7 +787,12 @@ def solve_case(
         time += time_step
         steps = step
         adapted_mesh = None
-        if settings.adaptive_mesh and step % settings.adaptation_interval == 0:
+        adaptation_warning = None
+        if (
+            settings.adaptive_mesh
+            and not adaptation_disabled
+            and step % settings.adaptation_interval == 0
+        ):
             current_primitive = _primitive_from_conservative(
                 conservative, turbulence_conservative, settings.gamma
             )
@@ -840,6 +849,9 @@ def solve_case(
                                     settings,
                                 )
                         adapted_mesh = mesh
+            except AdaptationBalanceError as error:
+                adaptation_disabled = True
+                adaptation_warning = f"Adaptive mesh disabled at step {step}: {error}"
             except (ValueError, FloatingPointError, np.linalg.LinAlgError) as error:
                 raise SolverError(f"Adaptive mesh update failed at step {step}: {error}") from error
         steady_converged = False
@@ -901,7 +913,7 @@ def solve_case(
                 progress_states = _states_from_solution(
                     progress_primitive, turbulence_conservative
                 )
-            if report_residual or progress_states is not None:
+            if report_residual or progress_states is not None or adaptation_warning:
                 component_residuals = ()
                 if report_residual:
                     component_residuals = tuple(
@@ -924,8 +936,11 @@ def solve_case(
                         progress_states,
                         adapted_mesh,
                         cpu_time_offset + thread_time() - cpu_start,
+                        adaptation_warning,
                     )
                 )
+            if adaptation_warning and progress_callback is None:
+                warnings.warn(adaptation_warning, RuntimeWarning, stacklevel=2)
         if solution_callback is not None and step % solution_interval == 0:
             snapshot_states = progress_states if progress_callback is not None else None
             if snapshot_states is None:

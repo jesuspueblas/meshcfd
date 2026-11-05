@@ -38,6 +38,13 @@ gui (PyQt5)         io (JSON)
   and preserves face, cell, patch connectivity, and optional parametric
   boundary curves. Adaptive refinement evaluates those curves for new boundary
   nodes and retains periodic patch matching.
+- `meshcfd.core.adaptation` marks cells from normalized solution gradients,
+  enforces 2:1 level balance, and limits neighboring cells to a one-step
+  difference in refinement depth along each coordinate. Directional depths
+  are measured relative to each original cell, preserving its initial aspect
+  ratio rather than treating it as refinement-induced anisotropy. A proposed
+  adaptation that cannot meet those balance constraints is skipped with a
+  solver warning instead of terminating the flow calculation.
 - `meshcfd.io.project_io` saves mesh references relative to the case file and
   loads them when opening a case. Cases without a source mesh file can still
   embed their mesh; versions 1 through 9 remain supported. Version 9 adds SST
