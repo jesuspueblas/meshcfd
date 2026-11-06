@@ -953,7 +953,7 @@ class MeshCanvas(QGraphicsView):
             speed = math.hypot(u, v)
             if speed <= 1e-14 or maximum <= 1e-14:
                 continue
-            length = length_scale * (0.25 + 0.75 * speed / maximum)
+            length = self.vector_scale * length_scale * speed / maximum
             dx, dy = length * u / speed, length * v / speed
             end_x, end_y = x + dx, y + dy
             angle, head = math.atan2(dy, dx), 0.28 * length

@@ -110,21 +110,68 @@ def vector_samples(grid: RegularFlowGrid, density: int = 2):
 
 
 def streamline_polylines(grid: RegularFlowGrid, density: int = 2):
-    """Integrate evenly seeded streamlines throughout the valid domain."""
+    """Integrate a fast, approximately uniform set of streamlines.
+
+    Candidate seeds cover the domain, but an occupancy grid suppresses seeds
+    and trajectories that would run too close to an existing streamline.  This
+    is both faster and visually more uniform than integrating every seed.
+    """
     density = max(1, min(4, density))
-    rows = np.linspace(1, len(grid.y) - 2, 5 + 3 * density, dtype=int)
-    columns = np.linspace(1, len(grid.x) - 2, 7 + 4 * density, dtype=int)
-    seeds = [(grid.x[column], grid.y[row]) for row in rows for column in columns
-             if grid.valid[row, column]]
-    spacing = 0.55 * min(float(np.diff(grid.x).mean()), float(np.diff(grid.y).mean()))
+    # Target separation in regular-grid cells. Higher density means a smaller
+    # exclusion radius, but the growth is deliberately sub-linear.
+    separation = {1: 4, 2: 3, 3: 2, 4: 1}[density]
+    occupied = np.zeros_like(grid.valid, dtype=bool)
     lines = []
-    for seed in seeds:
-        backward = _integrate(grid, np.asarray(seed), -spacing, 220)
-        forward = _integrate(grid, np.asarray(seed), spacing, 220)
+
+    row_count = max(3, int(math.ceil((len(grid.y) - 2) / max(2, separation - 1))) + 1)
+    column_count = max(3, int(math.ceil((len(grid.x) - 2) / max(3, separation))) + 1)
+    row_candidates = np.unique(np.linspace(1, len(grid.y) - 2, row_count, dtype=int))
+    column_candidates = np.unique(np.linspace(1, len(grid.x) - 2, column_count, dtype=int))
+    candidates = [(row, column) for column in column_candidates for row in row_candidates]
+    # Offset alternate columns to avoid a visually rigid rectangular pattern.
+    candidates = [
+        (min(len(grid.y) - 2, row + (column // max(1, separation)) % 2 * separation // 2), column)
+        for row, column in candidates
+    ]
+    step = 0.85 * min(float(np.diff(grid.x).mean()), float(np.diff(grid.y).mean()))
+    max_steps = {1: 120, 2: 150, 3: 175, 4: 200}[density]
+
+    for row, column in candidates:
+        if not grid.valid[row, column] or occupied[row, column]:
+            continue
+        seed = np.asarray((grid.x[column], grid.y[row]), dtype=float)
+        backward = _integrate(grid, seed, -step, max_steps)
+        forward = _integrate(grid, seed, step, max_steps)
         line = tuple(reversed(backward[1:])) + forward
-        if len(line) >= 5:
-            lines.append(line)
+        if len(line) < 5:
+            continue
+        indices = _polyline_grid_indices(grid, line)
+        if not indices:
+            continue
+        # Reject trajectories largely duplicating an existing line.
+        overlap = sum(occupied[r, c] for r, c in indices) / len(indices)
+        if overlap > 0.20:
+            continue
+        lines.append(line)
+        for r, c in indices:
+            r0, r1 = max(0, r - separation), min(len(grid.y), r + separation + 1)
+            c0, c1 = max(0, c - separation), min(len(grid.x), c + separation + 1)
+            occupied[r0:r1, c0:c1] = True
     return tuple(lines)
+
+
+def _polyline_grid_indices(grid: RegularFlowGrid, line):
+    """Map a polyline to unique regular-grid indices."""
+    result = []
+    seen = set()
+    for x, y in line:
+        column = int(np.clip(np.searchsorted(grid.x, x), 0, len(grid.x) - 1))
+        row = int(np.clip(np.searchsorted(grid.y, y), 0, len(grid.y) - 1))
+        key = (row, column)
+        if key not in seen:
+            seen.add(key)
+            result.append(key)
+    return result
 
 def _integrate(grid, seed, step, max_steps=220):
     points = [seed]
