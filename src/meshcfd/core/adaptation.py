@@ -44,12 +44,17 @@ def select_adaptation(
     threshold: float,
     maximum_level: int,
 ) -> tuple[dict[int, str], set[str]]:
-    """Mark cells using a normalized least-squares gradient indicator."""
+    """Mark cells with a scale-stable, distance-weighted gradient indicator.
+
+    Directional refinement is selected in the local directions of each
+    quadrilateral.  A candidate direction is accepted only when the predicted
+    children pass the geometric quality gate; otherwise isotropic refinement
+    is used.  This prevents repeated one-direction splits from creating the
+    very high aspect-ratio cells that destabilise the reconstruction.
+    """
     cell_ids = mesh.cell_ids or tuple(f"r{index}" for index in range(len(mesh.cells)))
     levels = mesh.cell_levels or (0,) * len(mesh.cells)
-    if not (
-        len(centers) == len(areas) == len(values) == len(mesh.cells)
-    ):
+    if not (len(centers) == len(areas) == len(values) == len(mesh.cells)):
         raise ValueError("Adaptation indicators must match the mesh cell count.")
     if not np.isfinite(values).all():
         raise ValueError("Adaptation indicator values must be finite.")
@@ -67,16 +72,11 @@ def select_adaptation(
     periodic_cell_pairs = []
     conditions = {condition.patch_id: condition for condition in case.boundary_conditions}
     for pair in case.periodic_pairs:
-        if (
-            pair.patch_a_id not in conditions
-            or pair.patch_b_id not in conditions
-            or conditions[pair.patch_a_id].kind != "Periodic"
-            or conditions[pair.patch_b_id].kind != "Periodic"
-        ):
+        if (pair.patch_a_id not in conditions or pair.patch_b_id not in conditions
+                or conditions[pair.patch_a_id].kind != "Periodic"
+                or conditions[pair.patch_b_id].kind != "Periodic"):
             continue
-        face_pairs, shift = match_periodic_faces(
-            mesh, pair.patch_a_id, pair.patch_b_id
-        )
+        face_pairs, shift = match_periodic_faces(mesh, pair.patch_a_id, pair.patch_b_id)
         for face_a, face_b in face_pairs:
             cell_a = mesh.face_owners[face_a]
             cell_b = mesh.face_owners[face_b]
@@ -86,9 +86,7 @@ def select_adaptation(
             links.append((cell_a, cell_b, -shift[0], -shift[1]))
             links.append((cell_b, cell_a, shift[0], shift[1]))
 
-    equations: list[list[tuple[float, float, float]]] = [
-        [] for _ in mesh.cells
-    ]
+    equations: list[list[tuple[float, float, float]]] = [[] for _ in mesh.cells]
     for first, second, shift_x, shift_y in links:
         dx = centers[second, 0] + shift_x - centers[first, 0]
         dy = centers[second, 1] + shift_y - centers[first, 1]
@@ -98,50 +96,55 @@ def select_adaptation(
 
     gradients = np.zeros((len(mesh.cells), 2), dtype=float)
     for cell_id, samples in enumerate(equations):
-        if not samples:
+        if len(samples) < 2:
             continue
-        offsets = np.asarray([(sample[0], sample[1]) for sample in samples])
-        differences = np.asarray([sample[2] for sample in samples])
-        gradients[cell_id] = np.linalg.lstsq(offsets, differences, rcond=None)[0]
+        offsets = np.asarray([(sample[0], sample[1]) for sample in samples], dtype=float)
+        differences = np.asarray([sample[2] for sample in samples], dtype=float)
+        distances2 = np.sum(offsets * offsets, axis=1)
+        weights = 1.0 / np.maximum(distances2, _GEOMETRY_TOLERANCE**2)
+        weighted_offsets = offsets * np.sqrt(weights)[:, None]
+        weighted_differences = differences * np.sqrt(weights)
+        normal = weighted_offsets.T @ weighted_offsets
+        if np.linalg.cond(normal) > 1e10:
+            normal += np.eye(2) * max(float(np.trace(normal)), 1.0) * 1e-10
+        gradients[cell_id] = np.linalg.lstsq(
+            weighted_offsets, weighted_differences, rcond=1e-12
+        )[0]
 
-    value_scale = max(float(np.ptp(values)), float(np.max(np.abs(values))) * 1e-12, 1e-30)
-    indicators = np.linalg.norm(gradients, axis=1) * np.sqrt(areas) / np.maximum(
-        np.abs(values), value_scale * 1e-8
-    )
+    value_range = float(np.ptp(values))
+    value_scale = max(value_range, float(np.max(np.abs(values))) * 1e-8, 1e-30)
+    gradient_indicator = np.linalg.norm(gradients, axis=1) * np.sqrt(areas) / value_scale
+    jump_indicator = np.zeros(len(mesh.cells), dtype=float)
+    for first, second, _shift_x, _shift_y in links:
+        jump = abs(float(values[second] - values[first])) / value_scale
+        jump_indicator[first] = max(jump_indicator[first], jump)
+    indicators = np.maximum(gradient_indicator, jump_indicator)
+
     refine_marks: dict[int, str] = {}
     for cell_id, indicator in enumerate(indicators):
         if indicator <= threshold or levels[cell_id] >= maximum_level:
             continue
-        vertices = [mesh.points[node] for node in mesh.cells[cell_id]]
-        width = max(point[0] for point in vertices) - min(
-            point[0] for point in vertices
-        )
-        height = max(point[1] for point in vertices) - min(
-            point[1] for point in vertices
-        )
-        variation_x = abs(gradients[cell_id, 0]) * width
-        variation_y = abs(gradients[cell_id, 1]) * height
-        if variation_x > 2.0 * variation_y:
-            refine_marks[cell_id] = "x"
-        elif variation_y > 2.0 * variation_x:
-            refine_marks[cell_id] = "y"
-        else:
-            refine_marks[cell_id] = "xy"
+        vertices = tuple(mesh.points[node] for node in mesh.cells[cell_id])
+        corners = _remove_collinear_vertices(vertices)
+        axis = "xy"
+        if len(corners) == 4 and _polygon_aspect_ratio(corners) < 3.0:
+            local_x, local_y = _local_cell_directions(corners)
+            variation_x = abs(float(np.dot(gradients[cell_id], local_x))) * _direction_length(corners, local_x)
+            variation_y = abs(float(np.dot(gradients[cell_id], local_y))) * _direction_length(corners, local_y)
+            if variation_x > 2.0 * max(variation_y, 1e-30):
+                axis = "x"
+            elif variation_y > 2.0 * max(variation_x, 1e-30):
+                axis = "y"
+            if axis != "xy" and not _split_passes_quality(vertices, axis):
+                axis = "xy"
+        refine_marks[cell_id] = axis
 
-    parent_by_child = {
-        child_id: record.parent_id
-        for record in mesh.refinement_records
-        for child_id in record.child_ids
-    }
+    parent_by_child = {child_id: record.parent_id for record in mesh.refinement_records for child_id in record.child_ids}
     index_by_id = {cell_id: index for index, cell_id in enumerate(cell_ids)}
     coarsen_parent_ids = {
-        record.parent_id
-        for record in mesh.refinement_records
-        if all(
-            child_id in index_by_id
-            and indicators[index_by_id[child_id]] < threshold * 0.1
-            for child_id in record.child_ids
-        )
+        record.parent_id for record in mesh.refinement_records
+        if all(child_id in index_by_id and indicators[index_by_id[child_id]] < threshold * 0.3
+               for child_id in record.child_ids)
     }
     for cell_a, cell_b, _shift in periodic_cell_pairs:
         parent_a = parent_by_child.get(cell_ids[cell_a])
@@ -151,42 +154,56 @@ def select_adaptation(
         if parent_b in coarsen_parent_ids and parent_a not in coarsen_parent_ids:
             coarsen_parent_ids.discard(parent_b)
 
-    children_by_parent = {
-        record.parent_id: set(record.child_ids)
-        for record in mesh.refinement_records
-    }
-    for parent_id in tuple(coarsen_parent_ids):
-        children = children_by_parent[parent_id]
-        neighbor_levels = [
-            levels[neighbor]
-            for child_id in children
-            if child_id in index_by_id
-            for neighbor in neighbors[index_by_id[child_id]]
-            if cell_ids[neighbor] not in children
-        ]
-        parent_level = next(
-            record.level
-            for record in mesh.refinement_records
-            if record.parent_id == parent_id
-        )
-        if any(level > parent_level + 1 for level in neighbor_levels):
-            coarsen_parent_ids.discard(parent_id)
-
+    directional_levels = _cell_directional_levels(mesh, cell_ids, mesh.refinement_records)
+    parent_directional_levels = _parent_directional_levels(mesh.refinement_records)
     _balance_adaptation_plan(
-        refine_marks,
-        coarsen_parent_ids,
-        neighbors,
-        cell_ids,
-        levels,
-        _cell_directional_levels(mesh, cell_ids, mesh.refinement_records),
-        _parent_directional_levels(mesh.refinement_records),
-        maximum_level,
-        mesh.refinement_records,
-        periodic_cell_pairs,
+        refine_marks, coarsen_parent_ids, neighbors, cell_ids, levels,
+        directional_levels, parent_directional_levels, maximum_level,
+        mesh.refinement_records, periodic_cell_pairs,
     )
-
     return refine_marks, coarsen_parent_ids
 
+
+def _local_cell_directions(vertices: tuple[tuple[float, float], ...]) -> tuple[np.ndarray, np.ndarray]:
+    """Return approximately orthogonal local directions for a quadrilateral."""
+    points = np.asarray(vertices, dtype=float)
+    first = 0.5 * ((points[1] - points[0]) + (points[2] - points[3]))
+    second = 0.5 * ((points[3] - points[0]) + (points[2] - points[1]))
+    if np.linalg.norm(first) <= _GEOMETRY_TOLERANCE or np.linalg.norm(second) <= _GEOMETRY_TOLERANCE:
+        return np.asarray((1.0, 0.0)), np.asarray((0.0, 1.0))
+    return first / np.linalg.norm(first), second / np.linalg.norm(second)
+
+
+def _direction_length(vertices: tuple[tuple[float, float], ...], direction: np.ndarray) -> float:
+    projections = np.asarray(vertices, dtype=float) @ direction
+    return float(np.ptp(projections))
+
+
+def _polygon_aspect_ratio(vertices: tuple[tuple[float, float], ...]) -> float:
+    points = np.asarray(_remove_collinear_vertices(vertices), dtype=float)
+    if len(points) < 3:
+        return math.inf
+    centered = points - np.mean(points, axis=0)
+    eigenvalues = np.linalg.eigvalsh(centered.T @ centered / len(points))
+    if eigenvalues[0] <= _GEOMETRY_TOLERANCE**2:
+        return math.inf
+    return math.sqrt(float(eigenvalues[-1] / eigenvalues[0]))
+
+
+def _split_passes_quality(vertices: tuple[tuple[float, float], ...], axis: str, max_aspect: float = 6.0) -> bool:
+    """Predict a split and reject degenerate or excessively stretched children."""
+    try:
+        children = _split_polygon(vertices, axis)
+    except ValueError:
+        return False
+    parent_area = abs(_signed_area(list(vertices)))
+    if parent_area <= _GEOMETRY_TOLERANCE:
+        return False
+    for child in children:
+        area = abs(_signed_area(list(child)))
+        if area / parent_area < 0.10 or _polygon_aspect_ratio(child) > max_aspect:
+            return False
+    return True
 
 def _least_disruptive_refinement_axis(
     cell_index: int,
@@ -718,7 +735,17 @@ def adapt_mesh(
         if axis is None:
             leaves.append(leaf)
             continue
+        # Balance propagation may add or alter marks after selection, so the
+        # quality gate is deliberately repeated at the point of mutation.
+        if axis != "xy" and not _split_passes_quality(leaf.vertices, axis):
+            axis = "xy"
         children = _split_polygon(leaf.vertices, axis, leaf.boundary_curves)
+        if any(_polygon_aspect_ratio(child) > 6.0 for child in children):
+            isotropic = _split_polygon(leaf.vertices, "xy", leaf.boundary_curves)
+            if max(_polygon_aspect_ratio(child) for child in isotropic) < max(
+                _polygon_aspect_ratio(child) for child in children
+            ):
+                children = isotropic
         if len(children) < 2:
             leaves.append(leaf)
             continue

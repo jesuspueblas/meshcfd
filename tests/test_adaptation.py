@@ -253,3 +253,20 @@ def test_two_to_one_balance_chooses_axis_that_avoids_anisotropic_plan_cycle():
     )
 
     assert refine_marks == {0: "y", 1: "xy"}
+
+
+def test_quality_gate_rejects_repeated_split_of_stretched_cell():
+    from meshcfd.core.adaptation import _split_passes_quality
+
+    stretched = ((0.0, 0.0), (12.0, 0.0), (12.0, 1.0), (0.0, 1.0))
+
+    assert not _split_passes_quality(stretched, "y")
+
+
+def test_quality_gate_accepts_regular_quadrilateral_split():
+    from meshcfd.core.adaptation import _split_passes_quality
+
+    regular = ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0))
+
+    assert _split_passes_quality(regular, "x")
+    assert _split_passes_quality(regular, "y")
