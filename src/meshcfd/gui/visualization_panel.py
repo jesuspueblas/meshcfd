@@ -13,6 +13,7 @@ from PyQt5.QtWidgets import (
     QDoubleSpinBox,
     QHBoxLayout,
     QLabel,
+    QSpinBox,
     QToolButton,
     QWidget,
 )
@@ -167,6 +168,24 @@ class VisualizationPanel(QWidget):
         self.orientation_combo.setToolTip("Color bar orientation")
         self.orientation_combo.setEnabled(self.show_colorbar_checkbox.isChecked())
         layout.addWidget(self.orientation_combo)
+        self._add_separator(layout)
+        self.show_contours_checkbox = QCheckBox("Isolines", self)
+        self.contour_variable_combo = self._combo(SOLUTION_VARIABLES, 125)
+        self.contour_variable_combo.setCurrentText("Pressure")
+        self.contour_levels_spin = QSpinBox(self)
+        self.contour_levels_spin.setRange(2, 50)
+        self.contour_levels_spin.setValue(15)
+        self.contour_levels_spin.setFixedSize(54, 28)
+        self.show_vectors_checkbox = QCheckBox("Vectors", self)
+        self.show_streamlines_checkbox = QCheckBox("Streamlines", self)
+        self.overlay_density_combo = self._combo(("Low", "Medium", "High", "Very high"), 82)
+        self.overlay_density_combo.setCurrentText("Medium")
+        layout.addWidget(self.show_contours_checkbox)
+        self._add_labeled_widget(layout, "Contour", self.contour_variable_combo)
+        self._add_labeled_widget(layout, "Levels", self.contour_levels_spin)
+        layout.addWidget(self.show_vectors_checkbox)
+        layout.addWidget(self.show_streamlines_checkbox)
+        self._add_labeled_widget(layout, "Density", self.overlay_density_combo)
         layout.addStretch(1)
 
         self.status_label = QLabel(self)
@@ -191,6 +210,12 @@ class VisualizationPanel(QWidget):
         self.orientation_combo.currentTextChanged.connect(self.changed.emit)
         self.minimum_spin.valueChanged.connect(self.changed.emit)
         self.maximum_spin.valueChanged.connect(self.changed.emit)
+        self.show_contours_checkbox.toggled.connect(self.changed.emit)
+        self.contour_variable_combo.currentTextChanged.connect(self.changed.emit)
+        self.contour_levels_spin.valueChanged.connect(self.changed.emit)
+        self.show_vectors_checkbox.toggled.connect(self.changed.emit)
+        self.show_streamlines_checkbox.toggled.connect(self.changed.emit)
+        self.overlay_density_combo.currentTextChanged.connect(self.changed.emit)
 
     def set_available_variables(self, variables: tuple[str, ...]) -> None:
         if tuple(
@@ -206,6 +231,17 @@ class VisualizationPanel(QWidget):
             selected if selected in variables else "Density"
         )
         self.variable_combo.blockSignals(signals_were_blocked)
+        contour_selected = self.contour_variable_combo.currentText()
+        blocked = self.contour_variable_combo.blockSignals(True)
+        self.contour_variable_combo.clear()
+        self.contour_variable_combo.addItems(variables)
+        self.contour_variable_combo.setCurrentText(
+            contour_selected if contour_selected in variables else "Pressure"
+        )
+        self.contour_variable_combo.blockSignals(blocked)
+
+    def overlay_density(self) -> int:
+        return self.overlay_density_combo.currentIndex() + 1
 
     def _set_interaction_mode(self, mode: str, checked: bool) -> None:
         if checked and self.interaction_mode != mode:

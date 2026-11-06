@@ -741,6 +741,12 @@ class MainWindow(QMainWindow):
                 show_colorbar=self.visualization_panel.show_colorbar_checkbox.isChecked(),
                 colorbar_orientation=self.visualization_panel.colorbar_orientation(),
                 colorbar_variable=variable,
+                show_contours=self.visualization_panel.show_contours_checkbox.isChecked(),
+                contour_variable=self.visualization_panel.contour_variable_combo.currentText(),
+                contour_levels=self.visualization_panel.contour_levels_spin.value(),
+                show_vectors=self.visualization_panel.show_vectors_checkbox.isChecked(),
+                show_streamlines=self.visualization_panel.show_streamlines_checkbox.isChecked(),
+                overlay_density=self.visualization_panel.overlay_density(),
             )
         except ValueError as error:
             self.canvas.set_solution(None)
@@ -755,6 +761,12 @@ class MainWindow(QMainWindow):
                 show_colorbar=self.visualization_panel.show_colorbar_checkbox.isChecked(),
                 colorbar_orientation=self.visualization_panel.colorbar_orientation(),
                 colorbar_variable=variable,
+                show_contours=self.visualization_panel.show_contours_checkbox.isChecked(),
+                contour_variable=self.visualization_panel.contour_variable_combo.currentText(),
+                contour_levels=self.visualization_panel.contour_levels_spin.value(),
+                show_vectors=self.visualization_panel.show_vectors_checkbox.isChecked(),
+                show_streamlines=self.visualization_panel.show_streamlines_checkbox.isChecked(),
+                overlay_density=self.visualization_panel.overlay_density(),
             )
             self.visualization_panel.set_result(
                 None,

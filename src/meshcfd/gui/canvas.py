@@ -11,6 +11,7 @@ from PyQt5.QtGui import (
     QImage,
     QLinearGradient,
     QPainter,
+    QPainterPath,
     QPen,
     QPixmap,
     QPolygonF,
@@ -21,6 +22,7 @@ from PyQt5.QtWidgets import (
     QGraphicsLineItem,
     QGraphicsPixmapItem,
     QGraphicsPolygonItem,
+    QGraphicsPathItem,
     QGraphicsScene,
     QGraphicsView,
     QHBoxLayout,
@@ -30,6 +32,9 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from meshcfd.core.flow_visualization import (
+    contour_segments, interpolate_to_regular_grid, streamline_polylines, vector_samples,
+)
 from meshcfd.core.model import FiniteVolumeMesh, InitialState
 
 PATCH_COLORS = (
@@ -463,6 +468,14 @@ class MeshCanvas(QGraphicsView):
         self.color_range: tuple[float, float] | None = None
         self.smooth_colors = False
         self.show_colorbar = False
+        self.show_contours = False
+        self.contour_variable = "Pressure"
+        self.contour_levels = 15
+        self.show_vectors = False
+        self.show_streamlines = False
+        self.overlay_density = 2
+        self._overlay_cache_key = None
+        self._overlay_grid = None
         self.interaction_mode = "Navigate"
         self._panning = False
         self._last_mouse_pos = None
@@ -742,6 +755,12 @@ class MeshCanvas(QGraphicsView):
         show_colorbar: bool = False,
         colorbar_orientation: str = "Horizontal",
         colorbar_variable: str = "Density",
+        show_contours: bool = False,
+        contour_variable: str = "Pressure",
+        contour_levels: int = 15,
+        show_vectors: bool = False,
+        show_streamlines: bool = False,
+        overlay_density: int = 2,
     ) -> tuple[float, ...]:
         values = self._solution_values(solution_variable)
         colors = color_values(values, color_map, color_scale, color_range)
@@ -753,6 +772,12 @@ class MeshCanvas(QGraphicsView):
         self.color_range = color_range
         self.smooth_colors = smooth_colors
         self.show_colorbar = show_colorbar
+        self.show_contours = show_contours
+        self.contour_variable = contour_variable
+        self.contour_levels = max(2, int(contour_levels))
+        self.show_vectors = show_vectors
+        self.show_streamlines = show_streamlines
+        self.overlay_density = max(1, min(4, int(overlay_density)))
         self.color_bar_overlay.set_values(
             values,
             color_map,
@@ -854,6 +879,59 @@ class MeshCanvas(QGraphicsView):
 
         if fit:
             self._set_content_scene_rect(self._mesh_content_bounds(), fit=True)
+
+    def _draw_flow_overlays(self) -> None:
+        if self.mesh is None or self.solution is None or not (self.show_contours or self.show_vectors or self.show_streamlines):
+            return
+        scalar = self._solution_values(self.contour_variable)
+        velocity_x = self._solution_values("Velocity X")
+        velocity_y = self._solution_values("Velocity Y")
+        key = (id(self.mesh), id(self.solution), self.contour_variable, self.overlay_density)
+        if key != self._overlay_cache_key:
+            resolution = (50 + 20 * self.overlay_density, 35 + 12 * self.overlay_density)
+            self._overlay_grid = interpolate_to_regular_grid(self.mesh, scalar, velocity_x, velocity_y, resolution)
+            self._overlay_cache_key = key
+        grid = self._overlay_grid
+        if self.show_contours:
+            pen = QPen(QColor(20, 20, 20, 190), 0)
+            for start, end, _level in contour_segments(grid, self.contour_levels):
+                item = self.scene().addLine(start[0], start[1], end[0], end[1], pen)
+                item.setData(0, "flow_overlay")
+                item.setZValue(20)
+        if self.show_vectors:
+            self._draw_velocity_vectors(grid)
+        if self.show_streamlines:
+            pen = QPen(QColor("#F8FAFC"), 0)
+            for line in streamline_polylines(grid, self.overlay_density):
+                path = QPainterPath(QPointF(*line[0]))
+                for point in line[1:]:
+                    path.lineTo(QPointF(*point))
+                item = QGraphicsPathItem(path)
+                item.setPen(pen)
+                item.setData(0, "flow_overlay")
+                item.setZValue(22)
+                self.scene().addItem(item)
+
+    def _draw_velocity_vectors(self, grid) -> None:
+        samples = vector_samples(grid, self.overlay_density)
+        if not samples:
+            return
+        maximum = max(math.hypot(u, v) for _x, _y, u, v in samples)
+        length_scale = 0.75 * min(float(grid.x[1] - grid.x[0]), float(grid.y[1] - grid.y[0]))
+        pen = QPen(QColor("#111827"), 0)
+        for x, y, u, v in samples:
+            speed = math.hypot(u, v)
+            if speed <= 1e-14 or maximum <= 1e-14:
+                continue
+            length = length_scale * (0.25 + 0.75 * speed / maximum)
+            dx, dy = length * u / speed, length * v / speed
+            end_x, end_y = x + dx, y + dy
+            angle, head = math.atan2(dy, dx), 0.28 * length
+            segments = (((x, y), (end_x, end_y)), ((end_x, end_y), (end_x - head * math.cos(angle - 0.55), end_y - head * math.sin(angle - 0.55))), ((end_x, end_y), (end_x - head * math.cos(angle + 0.55), end_y - head * math.sin(angle + 0.55))))
+            for first, second in segments:
+                item = self.scene().addLine(first[0], first[1], second[0], second[1], pen)
+                item.setData(0, "flow_overlay")
+                item.setZValue(25)
 
     def _mesh_content_bounds(self) -> QRectF:
         assert self.mesh is not None
