@@ -5,6 +5,7 @@ import math
 from dataclasses import dataclass
 
 import numpy as np
+from contourpy import contour_generator
 from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
 
 from meshcfd.core.model import FiniteVolumeMesh
@@ -46,14 +47,30 @@ def interpolate_to_regular_grid(
     y = np.linspace(minimum[1], maximum[1], max(8, resolution[1]))
     xx, yy = np.meshgrid(x, y)
     samples = np.column_stack((xx.ravel(), yy.ravel()))
-    valid = np.asarray([_point_in_mesh(point, mesh) for point in samples]).reshape(xx.shape)
+    # Vectorised cell containment is several orders faster than testing every
+    # grid point against every cell in Python.  The mask also keeps streamlines
+    # out of holes and solid bodies.
+    valid_flat = np.zeros(len(samples), dtype=bool)
+    for cell in mesh.cells:
+        polygon = np.asarray([mesh.points[node] for node in cell], dtype=float)
+        low, high = polygon.min(axis=0), polygon.max(axis=0)
+        candidates = np.flatnonzero(
+            (~valid_flat)
+            & (samples[:, 0] >= low[0]) & (samples[:, 0] <= high[0])
+            & (samples[:, 1] >= low[1]) & (samples[:, 1] <= high[1])
+        )
+        if candidates.size:
+            valid_flat[candidates] = _points_in_polygon(samples[candidates], polygon)
+    valid = valid_flat.reshape(xx.shape)
+    nearest = NearestNDInterpolator(centers, np.arange(count, dtype=float))
 
     def interpolate(values):
         values = np.asarray(values, dtype=float)
         linear = LinearNDInterpolator(centers, values, fill_value=np.nan)(samples)
         missing = ~np.isfinite(linear)
         if np.any(missing):
-            linear[missing] = NearestNDInterpolator(centers, values)(samples[missing])
+            nearest_indices = nearest(samples[missing]).astype(int)
+            linear[missing] = values[nearest_indices]
         return linear.reshape(xx.shape)
 
     scalar_grid = interpolate(scalar)
@@ -65,32 +82,21 @@ def interpolate_to_regular_grid(
 
 
 def contour_segments(grid: RegularFlowGrid, levels: int = 15):
-    """Return marching-squares contour line segments."""
+    """Return contours using contourpy's compiled marching-squares engine."""
     values = grid.scalar[grid.valid]
     if values.size == 0 or float(np.ptp(values)) <= 1e-15:
         return ()
-    contour_levels = np.linspace(float(np.min(values)), float(np.max(values)), levels + 2)[1:-1]
+    z = np.ma.array(grid.scalar, mask=~grid.valid)
+    generator = contour_generator(x=grid.x, y=grid.y, z=z, corner_mask=True)
+    contour_levels = np.linspace(float(values.min()), float(values.max()), levels + 2)[1:-1]
     segments = []
     for level in contour_levels:
-        for row in range(len(grid.y) - 1):
-            for column in range(len(grid.x) - 1):
-                corners = ((row, column), (row, column + 1), (row + 1, column + 1), (row + 1, column))
-                if not all(grid.valid[index] for index in corners):
-                    continue
-                points = []
-                for first, second in zip(corners, corners[1:] + corners[:1]):
-                    a, b = grid.scalar[first], grid.scalar[second]
-                    if (a <= level < b) or (b <= level < a):
-                        fraction = (level - a) / (b - a)
-                        ax, ay = grid.x[first[1]], grid.y[first[0]]
-                        bx, by = grid.x[second[1]], grid.y[second[0]]
-                        points.append((ax + fraction * (bx - ax), ay + fraction * (by - ay)))
-                if len(points) == 2:
-                    segments.append((points[0], points[1], float(level)))
-                elif len(points) == 4:
-                    segments.extend(((points[0], points[1], float(level)), (points[2], points[3], float(level))))
+        for line in generator.lines(float(level)):
+            segments.extend(
+                ((tuple(first), tuple(second), float(level))
+                 for first, second in zip(line[:-1], line[1:]))
+            )
     return tuple(segments)
-
 
 def vector_samples(grid: RegularFlowGrid, density: int = 2):
     """Return uniformly distributed velocity vectors, independent of mesh refinement."""
@@ -104,25 +110,26 @@ def vector_samples(grid: RegularFlowGrid, density: int = 2):
 
 
 def streamline_polylines(grid: RegularFlowGrid, density: int = 2):
-    """Integrate streamlines in both directions with midpoint RK2 steps."""
-    spacing = max(3, 11 - 2 * int(density))
-    seeds = [(grid.x[1], grid.y[row]) for row in range(1, len(grid.y) - 1, spacing)]
-    seeds += [(grid.x[column], grid.y[1]) for column in range(spacing, len(grid.x) - 1, spacing)]
-    step = 0.45 * min(float(np.diff(grid.x).mean()), float(np.diff(grid.y).mean()))
+    """Integrate evenly seeded streamlines throughout the valid domain."""
+    density = max(1, min(4, density))
+    rows = np.linspace(1, len(grid.y) - 2, 5 + 3 * density, dtype=int)
+    columns = np.linspace(1, len(grid.x) - 2, 7 + 4 * density, dtype=int)
+    seeds = [(grid.x[column], grid.y[row]) for row in rows for column in columns
+             if grid.valid[row, column]]
+    spacing = 0.55 * min(float(np.diff(grid.x).mean()), float(np.diff(grid.y).mean()))
     lines = []
     for seed in seeds:
-        backward = _integrate(grid, seed, -step)
-        forward = _integrate(grid, seed, step)
+        backward = _integrate(grid, np.asarray(seed), -spacing, 220)
+        forward = _integrate(grid, np.asarray(seed), spacing, 220)
         line = tuple(reversed(backward[1:])) + forward
-        if len(line) >= 3:
+        if len(line) >= 5:
             lines.append(line)
     return tuple(lines)
 
-
-def _integrate(grid, seed, step):
+def _integrate(grid, seed, step, max_steps=220):
     points = [seed]
     point = np.asarray(seed, dtype=float)
-    for _ in range(450):
+    for _ in range(max_steps):
         velocity = _bilinear_velocity(grid, point)
         if velocity is None:
             break
@@ -161,16 +168,16 @@ def _bilinear_velocity(grid, point):
     return np.asarray((u, v), dtype=float)
 
 
-def _point_in_mesh(point, mesh):
-    x, y = point
-    for cell in mesh.cells:
-        vertices = [mesh.points[node] for node in cell]
-        inside = False
-        previous = vertices[-1]
-        for current in vertices:
-            if ((current[1] > y) != (previous[1] > y)) and x < (previous[0] - current[0]) * (y - current[1]) / (previous[1] - current[1]) + current[0]:
-                inside = not inside
-            previous = current
-        if inside:
-            return True
-    return False
+def _points_in_polygon(points: np.ndarray, polygon: np.ndarray) -> np.ndarray:
+    """Vectorised ray casting for many points and one polygon."""
+    inside = np.zeros(len(points), dtype=bool)
+    previous = polygon[-1]
+    x, y = points[:, 0], points[:, 1]
+    for current in polygon:
+        crosses = (current[1] > y) != (previous[1] > y)
+        denominator = previous[1] - current[1]
+        if abs(denominator) > 1e-30:
+            boundary_x = (previous[0] - current[0]) * (y - current[1]) / denominator + current[0]
+            inside ^= crosses & (x < boundary_x)
+        previous = current
+    return inside

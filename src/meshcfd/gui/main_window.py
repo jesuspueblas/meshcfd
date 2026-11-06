@@ -745,7 +745,9 @@ class MainWindow(QMainWindow):
                 contour_variable=self.visualization_panel.contour_variable_combo.currentText(),
                 contour_levels=self.visualization_panel.contour_levels_spin.value(),
                 show_vectors=self.visualization_panel.show_vectors_checkbox.isChecked(),
+                vector_scale=self.visualization_panel.vector_scale_spin.value(),
                 show_streamlines=self.visualization_panel.show_streamlines_checkbox.isChecked(),
+                streamline_color=self.visualization_panel.streamline_color_combo.currentText(),
                 overlay_density=self.visualization_panel.overlay_density(),
             )
         except ValueError as error:
@@ -765,7 +767,9 @@ class MainWindow(QMainWindow):
                 contour_variable=self.visualization_panel.contour_variable_combo.currentText(),
                 contour_levels=self.visualization_panel.contour_levels_spin.value(),
                 show_vectors=self.visualization_panel.show_vectors_checkbox.isChecked(),
+                vector_scale=self.visualization_panel.vector_scale_spin.value(),
                 show_streamlines=self.visualization_panel.show_streamlines_checkbox.isChecked(),
+                streamline_color=self.visualization_panel.streamline_color_combo.currentText(),
                 overlay_density=self.visualization_panel.overlay_density(),
             )
             self.visualization_panel.set_result(

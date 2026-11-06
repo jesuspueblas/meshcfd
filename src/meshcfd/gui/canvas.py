@@ -472,10 +472,15 @@ class MeshCanvas(QGraphicsView):
         self.contour_variable = "Pressure"
         self.contour_levels = 15
         self.show_vectors = False
+        self.vector_scale = 1.0
         self.show_streamlines = False
+        self.streamline_color = "Dark"
         self.overlay_density = 2
         self._overlay_cache_key = None
         self._overlay_grid = None
+        self._overlay_grid_cache = {}
+        self._contour_geometry_cache = {}
+        self._streamline_geometry_cache = {}
         self.interaction_mode = "Navigate"
         self._panning = False
         self._last_mouse_pos = None
@@ -759,7 +764,9 @@ class MeshCanvas(QGraphicsView):
         contour_variable: str = "Pressure",
         contour_levels: int = 15,
         show_vectors: bool = False,
+        vector_scale: float = 1.0,
         show_streamlines: bool = False,
+        streamline_color: str = "Dark",
         overlay_density: int = 2,
     ) -> tuple[float, ...]:
         values = self._solution_values(solution_variable)
@@ -776,7 +783,9 @@ class MeshCanvas(QGraphicsView):
         self.contour_variable = contour_variable
         self.contour_levels = max(2, int(contour_levels))
         self.show_vectors = show_vectors
+        self.vector_scale = max(0.1, min(5.0, float(vector_scale)))
         self.show_streamlines = show_streamlines
+        self.streamline_color = streamline_color
         self.overlay_density = max(1, min(4, int(overlay_density)))
         self.color_bar_overlay.set_values(
             values,
@@ -892,21 +901,38 @@ class MeshCanvas(QGraphicsView):
         velocity_y = self._solution_values("Velocity Y")
         key = (id(self.mesh), id(self.solution), self.contour_variable, self.overlay_density)
         if key != self._overlay_cache_key:
-            resolution = (50 + 20 * self.overlay_density, 35 + 12 * self.overlay_density)
-            self._overlay_grid = interpolate_to_regular_grid(self.mesh, scalar, velocity_x, velocity_y, resolution)
+            if key not in self._overlay_grid_cache:
+                resolution = (50 + 20 * self.overlay_density, 35 + 12 * self.overlay_density)
+                self._overlay_grid_cache[key] = interpolate_to_regular_grid(
+                    self.mesh, scalar, velocity_x, velocity_y, resolution
+                )
+                if len(self._overlay_grid_cache) > 8:
+                    self._overlay_grid_cache.pop(next(iter(self._overlay_grid_cache)))
+            self._overlay_grid = self._overlay_grid_cache[key]
             self._overlay_cache_key = key
         grid = self._overlay_grid
         if self.show_contours:
             pen = QPen(QColor(20, 20, 20, 190), 0)
-            for start, end, _level in contour_segments(grid, self.contour_levels):
+            contour_key = (key, self.contour_levels)
+            lines = self._contour_geometry_cache.get(contour_key)
+            if lines is None:
+                lines = contour_segments(grid, self.contour_levels)
+                self._contour_geometry_cache[contour_key] = lines
+            for start, end, _level in lines:
                 item = self.scene().addLine(start[0], start[1], end[0], end[1], pen)
                 item.setData(0, "flow_overlay")
                 item.setZValue(20)
         if self.show_vectors:
             self._draw_velocity_vectors(grid)
         if self.show_streamlines:
-            pen = QPen(QColor("#F8FAFC"), 0)
-            for line in streamline_polylines(grid, self.overlay_density):
+            line_colors = {"Dark": "#1F2937", "Black": "#000000", "White": "#F8FAFC"}
+            pen = QPen(QColor(line_colors.get(self.streamline_color, "#1F2937")), 0)
+            streamline_key = (id(self.mesh), id(self.solution), self.overlay_density)
+            lines = self._streamline_geometry_cache.get(streamline_key)
+            if lines is None:
+                lines = streamline_polylines(grid, self.overlay_density)
+                self._streamline_geometry_cache[streamline_key] = lines
+            for line in lines:
                 path = QPainterPath(QPointF(*line[0]))
                 for point in line[1:]:
                     path.lineTo(QPointF(*point))

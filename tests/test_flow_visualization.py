@@ -67,3 +67,12 @@ def test_contours_vectors_and_streamlines_are_generated():
     lines = streamline_polylines(grid, 2)
     assert lines
     assert all(len(line) >= 3 for line in lines)
+
+
+def test_streamlines_seed_the_complete_domain():
+    mesh = regular_mesh()
+    grid = interpolate_to_regular_grid(mesh, (0, 1, 2, 0, 1, 2), (2,) * 6, (0,) * 6, (40, 24))
+    lines = streamline_polylines(grid, 2)
+    mean_heights = [sum(point[1] for point in line) / len(line) for line in lines]
+    assert min(mean_heights) < 0.5
+    assert max(mean_heights) > 1.5
