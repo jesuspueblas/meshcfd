@@ -877,6 +877,10 @@ class MeshCanvas(QGraphicsView):
 
             self._draw_solution_cut()
 
+        # Draw flow overlays after cells, mesh lines and the solution cut so the
+        # overlay artists remain visible and are recreated on every refresh.
+        self._draw_flow_overlays()
+
         if fit:
             self._set_content_scene_rect(self._mesh_content_bounds(), fit=True)
 
