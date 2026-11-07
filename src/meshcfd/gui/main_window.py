@@ -46,7 +46,7 @@ from meshcfd.gui.results import ConvergenceHistoryWidget, CutProfileWidget
 from meshcfd.gui.visualization_panel import VisualizationPanel
 from meshcfd.io.mesh_io import MeshImportError, load_mesh
 from meshcfd.io.project_io import load_case, save_case
-from meshcfd.io.vtk_io import VTKSeriesWriter, export_vtu
+from meshcfd.io.vtk_io import VTKSeriesWriter, export_convergence_csv, export_vtu
 
 
 class _SolverWorker(QThread):
@@ -387,6 +387,12 @@ class MainWindow(QMainWindow):
 
         self.action_export_vtu = QAction("Export Current Solution to VTU...", self)
         self.action_export_vtu.triggered.connect(self._on_export_vtu)
+        self.action_export_convergence = QAction(
+            "Export Convergence History to CSV...", self
+        )
+        self.action_export_convergence.triggered.connect(
+            self._on_export_convergence
+        )
         self.action_configure_vtk_series = QAction(
             "Configure VTU/PVD Time-Series Export...", self
         )
@@ -452,6 +458,7 @@ class MainWindow(QMainWindow):
 
         results_menu = self.menuBar().addMenu("&Results")
         results_menu.addAction(self.action_export_vtu)
+        results_menu.addAction(self.action_export_convergence)
         results_menu.addAction(self.action_configure_vtk_series)
         results_menu.addAction(self.action_disable_vtk_series)
         results_menu.addSeparator()
@@ -933,6 +940,7 @@ class MainWindow(QMainWindow):
             or self.case.final_solution is not None
         )
         self.action_export_vtu.setEnabled(has_solution)
+        self.action_export_convergence.setEnabled(bool(self._convergence_history))
         self.action_solution_cut.setEnabled(self.case.mesh is not None)
         self.action_convergence_history.setEnabled(True)
         self.action_disable_vtk_series.setEnabled(self._vtk_series_path is not None)
@@ -970,6 +978,36 @@ class MainWindow(QMainWindow):
             return
         self._log_output(f"Exported solution to {path}.")
         self.status_label.setText(f"Exported solution: {path.name}")
+
+    def _on_export_convergence(self) -> None:
+        if not self._convergence_history:
+            QMessageBox.information(
+                self,
+                "No Convergence History",
+                "Run the solver before exporting convergence history.",
+            )
+            return
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Convergence History",
+            "convergence_history.csv",
+            "CSV files (*.csv)",
+        )
+        if not filename:
+            return
+        path = Path(filename)
+        if path.suffix.lower() != ".csv":
+            path = path.with_suffix(".csv")
+        try:
+            export_convergence_csv(path, self._convergence_history)
+        except (OSError, ValueError) as error:
+            self._log_output(
+                f"Could not export convergence history: {error}", "ERROR"
+            )
+            QMessageBox.critical(self, "Convergence Export Error", str(error))
+            return
+        self._log_output(f"Exported convergence history to {path}.")
+        self.status_label.setText(f"Exported convergence history: {path.name}")
 
     def _on_configure_vtk_series(self) -> None:
         filename, _ = QFileDialog.getSaveFileName(

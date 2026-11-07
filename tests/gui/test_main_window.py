@@ -216,6 +216,7 @@ def test_result_actions_export_vtu_and_configure_series(qtbot, monkeypatch, tmp_
     window.case.solution_steps = 5
     window._update_results_actions()
     assert window.action_export_vtu.isEnabled()
+    assert not window.action_export_convergence.isEnabled()
     assert window.action_solution_cut.isEnabled()
 
     export_path = tmp_path / "final.vtu"
@@ -225,6 +226,22 @@ def test_result_actions_export_vtu_and_configure_series(qtbot, monkeypatch, tmp_
     )
     window._on_export_vtu()
     assert export_path.exists()
+
+    window._convergence_history = [
+        (5, 0.25, 0.1, (0.4, 0.3, 0.2, 0.1))
+    ]
+    window._update_results_actions()
+    assert window.action_export_convergence.isEnabled()
+    convergence_path = tmp_path / "convergence.csv"
+    monkeypatch.setattr(
+        "meshcfd.gui.main_window.QFileDialog.getSaveFileName",
+        lambda *_args: (str(convergence_path), "CSV files (*.csv)"),
+    )
+    window._on_export_convergence()
+    assert convergence_path.exists()
+    assert convergence_path.read_text(encoding="utf-8").startswith(
+        "Iteration,PhysicalTime,CPUTime,MassResidual"
+    )
 
     series_path = tmp_path / "history.pvd"
     monkeypatch.setattr(

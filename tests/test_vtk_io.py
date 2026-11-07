@@ -1,7 +1,7 @@
 import xml.etree.ElementTree as ET
 
 from meshcfd.core.model import Case, FiniteVolumeMesh, InitialState, MeshPatch
-from meshcfd.io.vtk_io import VTKSeriesWriter, export_vtu
+from meshcfd.io.vtk_io import VTKSeriesWriter, export_convergence_csv, export_vtu
 
 
 def make_case():
@@ -75,3 +75,36 @@ def test_vtk_series_is_incremental_and_can_resume_after_reopening(tmp_path):
     restarted = VTKSeriesWriter(series_path, append=False)
     restarted.add_snapshot(case, states, 0.0, 0)
     assert len(ET.parse(series_path).findall("./Collection/DataSet")) == 1
+
+
+def test_export_convergence_csv_writes_paraview_table(tmp_path):
+    path = export_convergence_csv(
+        tmp_path / "convergence.csv",
+        [
+            (10, 0.05, 0.2, (1e-2, 2e-3, 3e-3, 4e-4)),
+            (20, 0.10, 0.5, (5e-5, 6e-6, 7e-6, 8e-7, 9e-8, 1e-8)),
+        ],
+    )
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert lines[0] == (
+        "Iteration,PhysicalTime,CPUTime,MassResidual,MomentumXResidual,"
+        "MomentumYResidual,EnergyResidual,TurbulentKResidual,"
+        "TurbulentOmegaResidual"
+    )
+    import csv
+
+    rows = list(csv.DictReader(lines))
+    assert int(rows[0]["Iteration"]) == 10
+    assert float(rows[0]["MassResidual"]) == 1e-2
+    assert rows[0]["TurbulentKResidual"] == ""
+    assert rows[0]["TurbulentOmegaResidual"] == ""
+    assert int(rows[1]["Iteration"]) == 20
+    assert float(rows[1]["TurbulentOmegaResidual"]) == 1e-8
+
+
+def test_export_convergence_csv_rejects_empty_history(tmp_path):
+    import pytest
+
+    with pytest.raises(ValueError, match="no convergence history"):
+        export_convergence_csv(tmp_path / "empty.csv", [])

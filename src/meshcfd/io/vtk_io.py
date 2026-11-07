@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import math
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable
@@ -11,6 +12,62 @@ from meshcfd.core.model import Case, InitialState
 from meshcfd.core.solver import derive_solution_fields
 
 _VTK_CELL_POLYGON = 7
+
+
+_CONVERGENCE_COLUMNS = (
+    "Iteration",
+    "PhysicalTime",
+    "CPUTime",
+    "MassResidual",
+    "MomentumXResidual",
+    "MomentumYResidual",
+    "EnergyResidual",
+    "TurbulentKResidual",
+    "TurbulentOmegaResidual",
+)
+
+
+def export_convergence_csv(
+    path: str | Path,
+    history: Iterable[tuple[int, float, float, tuple[float, ...]]],
+) -> Path:
+    """Write convergence history as a ParaView-readable CSV table.
+
+    ParaView opens CSV files directly as tables, allowing any residual to be
+    plotted against iteration, physical/pseudo-time, or CPU time. Missing
+    turbulence residuals are written as empty fields.
+    """
+    destination = Path(path)
+    if destination.suffix.lower() != ".csv":
+        raise ValueError("A convergence-history filename must end in '.csv'.")
+
+    rows = list(history)
+    if not rows:
+        raise ValueError("There is no convergence history to export.")
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.writer(stream, lineterminator="\n")
+        writer.writerow(_CONVERGENCE_COLUMNS)
+        for iteration, physical_time, cpu_time, residuals in rows:
+            if len(residuals) not in (4, 6):
+                raise ValueError(
+                    "Each convergence sample must contain four or six residuals."
+                )
+            values = [iteration, physical_time, cpu_time, *residuals]
+            values.extend("" for _ in range(len(_CONVERGENCE_COLUMNS) - len(values)))
+            writer.writerow(_format_csv_value(value) for value in values)
+    return destination
+
+
+def _format_csv_value(value: int | float | str) -> int | str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool) or not math.isfinite(float(value)):
+        raise ValueError("Convergence history contains a non-finite numeric value.")
+    if isinstance(value, int):
+        return value
+    return format(value, ".17g")
 
 
 def export_vtu(
