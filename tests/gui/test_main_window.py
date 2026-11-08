@@ -205,6 +205,37 @@ def test_convergence_history_interval_control_updates_settings(qtbot):
     assert window.case.numerics.convergence_history_interval == 25
 
 
+def test_export_vtu_uses_initial_solution_before_solver_run(
+    qtbot, monkeypatch, tmp_path
+):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    case = Case()
+    case.set_mesh(make_mesh())
+    window._set_case(case, None)
+
+    assert window._simulation_solution is None
+    assert window.case.final_solution is None
+    assert window._initial_solution is not None
+    assert window.action_export_vtu.isEnabled()
+
+    export_path = tmp_path / "initial_solution.vtu"
+    monkeypatch.setattr(
+        "meshcfd.gui.main_window.QFileDialog.getSaveFileName",
+        lambda *_args: (str(export_path), "VTU files (*.vtu)"),
+    )
+
+    window._on_export_vtu()
+
+    assert export_path.exists()
+    root = ET.parse(export_path).getroot()
+    cell_data = root.find("./UnstructuredGrid/Piece/CellData")
+    assert cell_data is not None
+    assert cell_data.find("./DataArray[@Name='Density']") is not None
+    assert window.case.solution_time == 0.0
+    assert window.case.solution_steps == 0
+
+
 def test_result_actions_export_vtu_and_configure_series(qtbot, monkeypatch, tmp_path):
     window = MainWindow()
     qtbot.addWidget(window)

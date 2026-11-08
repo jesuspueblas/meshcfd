@@ -674,6 +674,7 @@ class MainWindow(QMainWindow):
             self._initial_solution = None
             self.canvas.set_solution(None)
             self._update_visualization()
+            self._update_results_actions()
             return
         try:
             self._initial_solution = evaluate_initial_conditions(
@@ -693,8 +694,10 @@ class MainWindow(QMainWindow):
                 scale=self.visualization_panel.scale_combo.currentText(),
                 error=str(error),
             )
+            self._update_results_actions()
             return
         self._update_visualization()
+        self._update_results_actions()
 
     def _clear_simulation_solution(self) -> None:
         self._simulation_solution = None
@@ -938,6 +941,7 @@ class MainWindow(QMainWindow):
         has_solution = (
             self._simulation_solution is not None
             or self.case.final_solution is not None
+            or self._initial_solution is not None
         )
         self.action_export_vtu.setEnabled(has_solution)
         self.action_export_convergence.setEnabled(bool(self._convergence_history))
@@ -946,10 +950,16 @@ class MainWindow(QMainWindow):
         self.action_disable_vtk_series.setEnabled(self._vtk_series_path is not None)
 
     def _on_export_vtu(self) -> None:
-        states = self._simulation_solution or self.case.final_solution
+        states = (
+            self._simulation_solution
+            or self.case.final_solution
+            or self._initial_solution
+        )
         if states is None:
             QMessageBox.information(
-                self, "No Solution", "Run the solver before exporting a solution."
+                self,
+                "No Solution",
+                "Define a valid initial solution or run the solver before exporting.",
             )
             return
         filename, _ = QFileDialog.getSaveFileName(
