@@ -2281,6 +2281,26 @@ def _reconstruct(
     return primitive[cell_ids] + factors[cell_ids] * increments
 
 
+
+def _accumulate_rows(
+    target: np.ndarray, indices: np.ndarray, values: np.ndarray
+) -> None:
+    """Accumulate rows without the serial overhead of ``numpy.add.at``.
+
+    ``bincount`` is substantially faster for finite-volume face-to-cell
+    assembly while preserving the required summation for repeated cell IDs.
+    """
+    if len(indices) == 0:
+        return
+    size = len(target)
+    if values.ndim == 1:
+        target += np.bincount(indices, weights=values, minlength=size)
+        return
+    for column in range(values.shape[1]):
+        target[:, column] += np.bincount(
+            indices, weights=values[:, column], minlength=size
+        )
+
 def _residual(
     conservative: np.ndarray,
     geometry: _Geometry,
@@ -2311,13 +2331,18 @@ def _residual(
             primitive, geometry, settings.limiter
         )
     else:
-        gradients = np.zeros((len(primitive), 4, 2))
-        factors = np.ones((len(primitive), 4))
+        gradients = None
+        factors = None
 
-    def reconstruct(cell_ids: np.ndarray, offsets: np.ndarray) -> np.ndarray:
-        return _reconstruct(
-            primitive, gradients, factors, cell_ids, offsets, curvature
-        )
+    if gradients is None:
+        def reconstruct(cell_ids: np.ndarray, offsets: np.ndarray) -> np.ndarray:
+            del offsets
+            return primitive[cell_ids]
+    else:
+        def reconstruct(cell_ids: np.ndarray, offsets: np.ndarray) -> np.ndarray:
+            return _reconstruct(
+                primitive, gradients, factors, cell_ids, offsets, curvature
+            )
 
     derivative = np.zeros_like(conservative)
     if len(geometry.interior_faces):
@@ -2340,8 +2365,8 @@ def _residual(
                 flux[:, 0] >= 0.0, turbulence[owners, 0], turbulence[neighbours, 0]
             )
         integrated = flux * geometry.face_lengths[faces, None]
-        np.add.at(derivative, owners, -integrated / geometry.areas[owners, None])
-        np.add.at(
+        _accumulate_rows(derivative, owners, -integrated / geometry.areas[owners, None])
+        _accumulate_rows(
             derivative, neighbours, integrated / geometry.areas[neighbours, None]
         )
     if len(geometry.periodic_faces_a):
@@ -2389,7 +2414,7 @@ def _residual(
         if turbulence is not None:
             flux[:, 3] += flux[:, 0] * turbulence[owners, 0]
         integrated = flux * geometry.face_lengths[faces, None]
-        np.add.at(derivative, owners, -integrated / geometry.areas[owners, None])
+        _accumulate_rows(derivative, owners, -integrated / geometry.areas[owners, None])
     if len(geometry.velocity_inlet_faces):
         faces = geometry.velocity_inlet_faces
         owners = geometry.owners[faces]
@@ -2412,7 +2437,7 @@ def _residual(
                 flux[:, 0] >= 0.0, turbulence[owners, 0], exterior_k
             )
         integrated = flux * geometry.face_lengths[faces, None]
-        np.add.at(derivative, owners, -integrated / geometry.areas[owners, None])
+        _accumulate_rows(derivative, owners, -integrated / geometry.areas[owners, None])
     if len(geometry.pressure_outlet_faces):
         faces = geometry.pressure_outlet_faces
         owners = geometry.owners[faces]
@@ -2436,7 +2461,7 @@ def _residual(
                 flux[:, 0] >= 0.0, turbulence[owners, 0], exterior_k
             )
         integrated = flux * geometry.face_lengths[faces, None]
-        np.add.at(derivative, owners, -integrated / geometry.areas[owners, None])
+        _accumulate_rows(derivative, owners, -integrated / geometry.areas[owners, None])
     if len(geometry.far_field_faces):
         faces = geometry.far_field_faces
         owners = geometry.owners[faces]
@@ -2464,7 +2489,7 @@ def _residual(
                 flux[:, 0] >= 0.0, turbulence[owners, 0], exterior_k
             )
         integrated = flux * geometry.face_lengths[faces, None]
-        np.add.at(derivative, owners, -integrated / geometry.areas[owners, None])
+        _accumulate_rows(derivative, owners, -integrated / geometry.areas[owners, None])
     for boundary in geometry.pressure_inlets:
         faces = boundary.faces
         owners = geometry.owners[faces]
@@ -2493,7 +2518,7 @@ def _residual(
                 flux[:, 0] >= 0.0, turbulence[owners, 0], exterior_k
             )
         integrated = flux * geometry.face_lengths[faces, None]
-        np.add.at(derivative, owners, -integrated / geometry.areas[owners, None])
+        _accumulate_rows(derivative, owners, -integrated / geometry.areas[owners, None])
     for boundary in geometry.mass_flow_inlets:
         faces = boundary.faces
         owners = geometry.owners[faces]
@@ -2523,7 +2548,7 @@ def _residual(
                 flux[:, 0] >= 0.0, turbulence[owners, 0], exterior_k
             )
         integrated = flux * geometry.face_lengths[faces, None]
-        np.add.at(derivative, owners, -integrated / geometry.areas[owners, None])
+        _accumulate_rows(derivative, owners, -integrated / geometry.areas[owners, None])
     for boundary in geometry.mass_flow_outlets:
         faces = boundary.faces
         owners = geometry.owners[faces]
@@ -2543,7 +2568,7 @@ def _residual(
         if turbulence is not None:
             flux[:, 3] += flux[:, 0] * turbulence[owners, 0]
         integrated = flux * geometry.face_lengths[faces, None]
-        np.add.at(derivative, owners, -integrated / geometry.areas[owners, None])
+        _accumulate_rows(derivative, owners, -integrated / geometry.areas[owners, None])
     if settings.viscosity_model != "Inviscid":
         derivative += _viscous_residual(
             primitive, geometry, settings, turbulence
@@ -3324,8 +3349,8 @@ def _sst_residual(
             )
             flux[:, variable] = mass_flux[faces] * upwind
         integrated = flux * geometry.face_lengths[faces, None]
-        np.add.at(derivative, owners, -integrated / geometry.areas[owners, None])
-        np.add.at(
+        _accumulate_rows(derivative, owners, -integrated / geometry.areas[owners, None])
+        _accumulate_rows(
             derivative, neighbours, integrated / geometry.areas[neighbours, None]
         )
     faces_a, faces_b = geometry.periodic_faces_a, geometry.periodic_faces_b
@@ -3371,7 +3396,7 @@ def _sst_residual(
         )
         flux = mass_flux[faces, None] * upwind
         integrated = flux * geometry.face_lengths[faces, None]
-        np.add.at(derivative, owners, -integrated / geometry.areas[owners, None])
+        _accumulate_rows(derivative, owners, -integrated / geometry.areas[owners, None])
 
     gradients = turbulence_gradients
     faces = geometry.interior_faces
@@ -3388,8 +3413,8 @@ def _sst_residual(
             face_gradient * geometry.face_normals[faces, None, :], axis=2
         )
         integrated = flux * geometry.face_lengths[faces, None]
-        np.add.at(derivative, owners, integrated / geometry.areas[owners, None])
-        np.add.at(
+        _accumulate_rows(derivative, owners, integrated / geometry.areas[owners, None])
+        _accumulate_rows(
             derivative, neighbours, -integrated / geometry.areas[neighbours, None]
         )
     faces_a, faces_b = geometry.periodic_faces_a, geometry.periodic_faces_b
@@ -3667,8 +3692,8 @@ def _viscous_residual(
         if turbulent_energy_flux is not None:
             flux[:, 3] += turbulent_energy_flux
         integrated = flux * geometry.face_lengths[faces, None]
-        np.add.at(derivative, owners, integrated / geometry.areas[owners, None])
-        np.add.at(
+        _accumulate_rows(derivative, owners, integrated / geometry.areas[owners, None])
+        _accumulate_rows(
             derivative, neighbours, -integrated / geometry.areas[neighbours, None]
         )
 
