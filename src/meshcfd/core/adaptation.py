@@ -156,11 +156,25 @@ def select_adaptation(
 
     directional_levels = _cell_directional_levels(mesh, cell_ids, mesh.refinement_records)
     parent_directional_levels = _parent_directional_levels(mesh.refinement_records)
-    _balance_adaptation_plan(
-        refine_marks, coarsen_parent_ids, neighbors, cell_ids, levels,
-        directional_levels, parent_directional_levels, maximum_level,
-        mesh.refinement_records, periodic_cell_pairs,
-    )
+    # Balance can introduce new directional marks.  Resolve their geometric
+    # quality before returning, then rebalance so periodic partners always use
+    # the same final split topology.  Without this second phase adapt_mesh()
+    # could independently promote only one side of a periodic pair to ``xy``.
+    while True:
+        _balance_adaptation_plan(
+            refine_marks, coarsen_parent_ids, neighbors, cell_ids, levels,
+            directional_levels, parent_directional_levels, maximum_level,
+            mesh.refinement_records, periodic_cell_pairs,
+        )
+        adjusted = False
+        for cell_index, axis in tuple(refine_marks.items()):
+            vertices = tuple(mesh.points[node] for node in mesh.cells[cell_index])
+            final_axis = _quality_adjusted_split_axis(vertices, axis)
+            if final_axis != axis:
+                refine_marks[cell_index] = final_axis
+                adjusted = True
+        if not adjusted:
+            break
     return refine_marks, coarsen_parent_ids
 
 
@@ -204,6 +218,16 @@ def _split_passes_quality(vertices: tuple[tuple[float, float], ...], axis: str, 
         if area / parent_area < 0.10 or _polygon_aspect_ratio(child) > max_aspect:
             return False
     return True
+
+
+def _quality_adjusted_split_axis(
+    vertices: tuple[tuple[float, float], ...], axis: str
+) -> str:
+    """Return the actual split axis after applying the geometric quality gate."""
+    if axis == "xy" or _split_passes_quality(vertices, axis):
+        return axis
+    return "xy"
+
 
 def _least_disruptive_refinement_axis(
     cell_index: int,
@@ -735,17 +759,11 @@ def adapt_mesh(
         if axis is None:
             leaves.append(leaf)
             continue
-        # Balance propagation may add or alter marks after selection, so the
-        # quality gate is deliberately repeated at the point of mutation.
-        if axis != "xy" and not _split_passes_quality(leaf.vertices, axis):
-            axis = "xy"
+        # select_adaptation() has already stabilized these marks across every
+        # periodic pair.  Keep this guard for direct adapt_mesh() callers, but
+        # make the chosen topology explicit and deterministic.
+        axis = _quality_adjusted_split_axis(leaf.vertices, axis)
         children = _split_polygon(leaf.vertices, axis, leaf.boundary_curves)
-        if any(_polygon_aspect_ratio(child) > 6.0 for child in children):
-            isotropic = _split_polygon(leaf.vertices, "xy", leaf.boundary_curves)
-            if max(_polygon_aspect_ratio(child) for child in isotropic) < max(
-                _polygon_aspect_ratio(child) for child in children
-            ):
-                children = isotropic
         if len(children) < 2:
             leaves.append(leaf)
             continue

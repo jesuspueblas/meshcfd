@@ -232,6 +232,13 @@ def test_periodic_adaptation_marking_keeps_spline_side_cells_paired():
         assert marks.get(cell_a) == marks.get(cell_b)
     assert any(mesh.face_owners[face_a] in marks for face_a, _ in paired_faces)
 
+    # The quality gate must not silently change only one side after periodic
+    # marks have been synchronized.  The adapted patches must remain matchable.
+    refined, _ = adapt_mesh(mesh, marks, set())
+    refined_pairs, _ = match_periodic_faces(refined, 0, 1)
+    assert refined_pairs
+    assert len(refined.patches[0].face_ids) == len(refined.patches[1].face_ids)
+
 
 def test_inviscid_vortex_runs_after_adapting_curved_periodic_mesh():
     mesh = _curved_periodic_mesh()
