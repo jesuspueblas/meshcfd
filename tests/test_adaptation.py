@@ -7,6 +7,7 @@ from meshcfd.core.adaptation import (
     adapt_mesh,
     cell_areas,
 )
+from meshcfd.core.model import RefinementRecord
 from meshcfd.io.mesh_io import mesh_from_dict, mesh_to_dict
 
 
@@ -253,6 +254,29 @@ def test_two_to_one_balance_chooses_axis_that_avoids_anisotropic_plan_cycle():
     )
 
     assert refine_marks == {0: "y", 1: "xy"}
+
+
+def test_balance_keeps_periodic_coarsening_paired_after_balance_adjustment():
+    records = (
+        RefinementRecord("r0", ("r0.0", "r0.1"), ((0, 0), (1, 0), (1, 1), (0, 1)), 0),
+        RefinementRecord("r1", ("r1.0", "r1.1"), ((2, 0), (3, 0), (3, 1), (2, 1)), 0),
+    )
+    coarsen_parent_ids = {"r0", "r1"}
+
+    _balance_adaptation_plan(
+        {},
+        coarsen_parent_ids,
+        [{2}, set(), {0}],
+        ("r0.0", "r1.0", "r2.0"),
+        (1, 1, 3),
+        ((1, 0), (1, 0), (3, 0)),
+        {"r0": (0, 0), "r1": (0, 0)},
+        3,
+        records,
+        [(0, 1, (0.0, 0.0))],
+    )
+
+    assert not coarsen_parent_ids
 
 
 def test_quality_gate_rejects_repeated_split_of_stretched_cell():

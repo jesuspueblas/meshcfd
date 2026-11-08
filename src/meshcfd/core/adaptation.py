@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 from bisect import bisect_left, bisect_right
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -15,6 +16,7 @@ from meshcfd.core.model import (
     Case,
     FiniteVolumeMesh,
     MeshPatch,
+    PeriodicBoundaryPair,
     RefinementRecord,
 )
 from meshcfd.core.periodic import match_periodic_faces
@@ -69,22 +71,21 @@ def select_adaptation(
         neighbors[owner].add(neighbour)
         neighbors[neighbour].add(owner)
 
-    periodic_cell_pairs = []
     conditions = {condition.patch_id: condition for condition in case.boundary_conditions}
-    for pair in case.periodic_pairs:
-        if (pair.patch_a_id not in conditions or pair.patch_b_id not in conditions
-                or conditions[pair.patch_a_id].kind != "Periodic"
-                or conditions[pair.patch_b_id].kind != "Periodic"):
-            continue
-        face_pairs, shift = match_periodic_faces(mesh, pair.patch_a_id, pair.patch_b_id)
-        for face_a, face_b in face_pairs:
-            cell_a = mesh.face_owners[face_a]
-            cell_b = mesh.face_owners[face_b]
-            periodic_cell_pairs.append((cell_a, cell_b, shift))
-            neighbors[cell_a].add(cell_b)
-            neighbors[cell_b].add(cell_a)
-            links.append((cell_a, cell_b, -shift[0], -shift[1]))
-            links.append((cell_b, cell_a, shift[0], shift[1]))
+    active_periodic_pairs = tuple(
+        pair
+        for pair in case.periodic_pairs
+        if pair.patch_a_id in conditions
+        and pair.patch_b_id in conditions
+        and conditions[pair.patch_a_id].kind == "Periodic"
+        and conditions[pair.patch_b_id].kind == "Periodic"
+    )
+    periodic_cell_pairs = _periodic_cell_pairs(mesh, active_periodic_pairs)
+    for cell_a, cell_b, shift in periodic_cell_pairs:
+        neighbors[cell_a].add(cell_b)
+        neighbors[cell_b].add(cell_a)
+        links.append((cell_a, cell_b, -shift[0], -shift[1]))
+        links.append((cell_b, cell_a, shift[0], shift[1]))
 
     equations: list[list[tuple[float, float, float]]] = [[] for _ in mesh.cells]
     for first, second, shift_x, shift_y in links:
@@ -139,20 +140,12 @@ def select_adaptation(
                 axis = "xy"
         refine_marks[cell_id] = axis
 
-    parent_by_child = {child_id: record.parent_id for record in mesh.refinement_records for child_id in record.child_ids}
     index_by_id = {cell_id: index for index, cell_id in enumerate(cell_ids)}
     coarsen_parent_ids = {
         record.parent_id for record in mesh.refinement_records
         if all(child_id in index_by_id and indicators[index_by_id[child_id]] < threshold * 0.3
                for child_id in record.child_ids)
     }
-    for cell_a, cell_b, _shift in periodic_cell_pairs:
-        parent_a = parent_by_child.get(cell_ids[cell_a])
-        parent_b = parent_by_child.get(cell_ids[cell_b])
-        if parent_a in coarsen_parent_ids and parent_b not in coarsen_parent_ids:
-            coarsen_parent_ids.discard(parent_a)
-        if parent_b in coarsen_parent_ids and parent_a not in coarsen_parent_ids:
-            coarsen_parent_ids.discard(parent_b)
 
     directional_levels = _cell_directional_levels(mesh, cell_ids, mesh.refinement_records)
     parent_directional_levels = _parent_directional_levels(mesh.refinement_records)
@@ -281,6 +274,7 @@ def _balance_adaptation_plan(
     seen_plan_signatures: set[int] = set()
     changed = True
     while changed:
+        changed = False
         plan_signature = hash(
             (frozenset(refine_marks.items()), frozenset(coarsen_parent_ids))
         )
@@ -289,7 +283,16 @@ def _balance_adaptation_plan(
                 "The adaptive refinement plan cycles while balancing mesh transitions."
             )
         seen_plan_signatures.add(plan_signature)
-        changed = False
+        for cell_a, cell_b, _shift in periodic_cell_pairs:
+            parent_a = parent_by_child.get(cell_ids[cell_a])
+            parent_b = parent_by_child.get(cell_ids[cell_b])
+            if parent_a in coarsen_parent_ids and parent_b not in coarsen_parent_ids:
+                coarsen_parent_ids.remove(parent_a)
+                changed = True
+            if parent_b in coarsen_parent_ids and parent_a not in coarsen_parent_ids:
+                coarsen_parent_ids.remove(parent_b)
+                changed = True
+
         for cell_a, cell_b, _shift in periodic_cell_pairs:
             if cell_a in refine_marks and cell_b not in refine_marks:
                 if levels[cell_b] >= maximum_level:
@@ -678,6 +681,7 @@ def adapt_mesh(
     mesh: FiniteVolumeMesh,
     refine_marks: dict[int, str],
     coarsen_parent_ids: set[str],
+    periodic_pairs: Sequence[PeriodicBoundaryPair] = (),
 ) -> tuple[FiniteVolumeMesh, tuple[tuple[int, ...], ...]]:
     """Adapt selected cells and return source-cell groups for conservative transfer."""
     if not mesh.cells:
@@ -696,6 +700,10 @@ def adapt_mesh(
         owner = mesh.face_owners[face_id]
         neighbours[owner].add(neighbour)
         neighbours[neighbour].add(owner)
+    periodic_cell_pairs = _periodic_cell_pairs(mesh, periodic_pairs)
+    for cell_a, cell_b, _shift in periodic_cell_pairs:
+        neighbours[cell_a].add(cell_b)
+        neighbours[cell_b].add(cell_a)
     maximum_level = max(
         (*cell_levels, *(cell_levels[cell_id] + 1 for cell_id in refine_marks)),
         default=0,
@@ -710,7 +718,7 @@ def adapt_mesh(
         _parent_directional_levels(mesh.refinement_records),
         maximum_level,
         mesh.refinement_records,
-        [],
+        periodic_cell_pairs,
     )
 
     records = {record.parent_id: record for record in mesh.refinement_records}
@@ -759,9 +767,7 @@ def adapt_mesh(
         if axis is None:
             leaves.append(leaf)
             continue
-        # select_adaptation() has already stabilized these marks across every
-        # periodic pair.  Keep this guard for direct adapt_mesh() callers, but
-        # make the chosen topology explicit and deterministic.
+        # Keep the quality guard for callers that provide marks directly.
         axis = _quality_adjusted_split_axis(leaf.vertices, axis)
         children = _split_polygon(leaf.vertices, axis, leaf.boundary_curves)
         if len(children) < 2:
@@ -787,6 +793,26 @@ def adapt_mesh(
     rebuilt = _rebuild_mesh(mesh, leaves, tuple(records.values()) + tuple(new_records))
     _validate_two_to_one(rebuilt)
     return rebuilt, tuple(leaf.source_cells for leaf in leaves)
+
+
+def _periodic_cell_pairs(
+    mesh: FiniteVolumeMesh,
+    periodic_pairs: Sequence[PeriodicBoundaryPair],
+) -> list[tuple[int, int, tuple[float, float]]]:
+    cell_pairs = []
+    for pair in periodic_pairs:
+        face_pairs, shift = match_periodic_faces(
+            mesh, pair.patch_a_id, pair.patch_b_id
+        )
+        cell_pairs.extend(
+            (
+                mesh.face_owners[face_a],
+                mesh.face_owners[face_b],
+                shift,
+            )
+            for face_a, face_b in face_pairs
+        )
+    return cell_pairs
 
 
 def _validate_two_to_one(mesh: FiniteVolumeMesh) -> None:

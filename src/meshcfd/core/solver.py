@@ -814,7 +814,10 @@ def solve_case(
                 if refine_marks or coarsen_parent_ids:
                     old_areas = np.asarray(cell_areas(mesh), dtype=float)
                     adapted, source_groups = adapt_mesh(
-                        mesh, refine_marks, coarsen_parent_ids
+                        mesh,
+                        refine_marks,
+                        coarsen_parent_ids,
+                        periodic_pairs=case.periodic_pairs,
                     )
                     if adapted is not mesh:
                         new_areas = np.asarray(cell_areas(adapted), dtype=float)
