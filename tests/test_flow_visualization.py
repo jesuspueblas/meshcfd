@@ -9,8 +9,8 @@ from meshcfd.core.flow_visualization import (
 from meshcfd.core.model import FiniteVolumeMesh, MeshPatch
 
 
-def regular_mesh():
-    points = tuple((float(x), float(y)) for y in range(3) for x in range(4))
+def regular_mesh(width=3.0, height=2.0):
+    points = tuple((x * width / 3.0, y * height / 2.0) for y in range(3) for x in range(4))
     cells = []
     for row in range(2):
         for column in range(3):
@@ -76,3 +76,16 @@ def test_streamlines_seed_the_complete_domain():
     mean_heights = [sum(point[1] for point in line) / len(line) for line in lines]
     assert min(mean_heights) < 0.5
     assert max(mean_heights) > 1.5
+
+
+def test_streamlines_cross_a_long_domain_without_step_budget_truncation():
+    mesh = regular_mesh(width=3.0, height=1.0)
+    count = len(mesh.cells)
+    grid = interpolate_to_regular_grid(
+        mesh, (0.0,) * count, (2.0,) * count, (0.0,) * count, (90, 60)
+    )
+
+    lines = streamline_polylines(grid, 2)
+    domain_width = float(np.ptp(grid.x))
+
+    assert max(line[-1][0] - line[0][0] for line in lines) >= 0.95 * domain_width

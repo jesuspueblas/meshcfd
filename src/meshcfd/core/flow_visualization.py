@@ -134,7 +134,12 @@ def streamline_polylines(grid: RegularFlowGrid, density: int = 2):
         for row, column in candidates
     ]
     step = 0.85 * min(float(np.diff(grid.x).mean()), float(np.diff(grid.y).mean()))
-    max_steps = {1: 120, 2: 150, 3: 175, 4: 200}[density]
+    # The integration budget must depend on the physical size and resolution
+    # of the interpolation grid. A fixed number of steps truncates lines in
+    # long or highly anisotropic domains, especially because candidates are
+    # visited from the inlet side first and then suppress downstream seeds.
+    domain_diagonal = math.hypot(float(np.ptp(grid.x)), float(np.ptp(grid.y)))
+    max_steps = max(32, int(math.ceil(1.10 * domain_diagonal / step)))
 
     for row, column in candidates:
         if not grid.valid[row, column] or occupied[row, column]:
