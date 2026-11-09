@@ -1125,29 +1125,53 @@ def _explicit_rk4_step(
     geometry: _Geometry,
     settings: NumericalSettings,
 ) -> np.ndarray:
+    """Advance with the five-stage, fourth-order SSP Runge-Kutta method.
+
+    The classical four-stage RK4 formula is not strong-stability-preserving.
+    It can therefore create new extrema in transported SST variables even
+    when the forward-Euler spatial operator is TVD.  SSPRK(5,4) retains that
+    nonlinear stability property under the solver's CFL restriction while
+    preserving fourth-order temporal accuracy.
+    """
     initial = _limit_time_state(state, settings)
-    derivative_one = _time_state_rhs(initial, geometry, settings)
+
+    derivative = _time_state_rhs(initial, geometry, settings)
+    stage_one = _limit_time_state(
+        initial + _scale_cell_rate(derivative, 0.391752226571890 * time_step),
+        settings,
+    )
+
+    derivative = _time_state_rhs(stage_one, geometry, settings)
     stage_two = _limit_time_state(
-        initial + _scale_cell_rate(derivative_one, 0.5 * time_step), settings
+        0.444370493651235 * initial
+        + 0.555629506348765 * stage_one
+        + _scale_cell_rate(derivative, 0.368410593050371 * time_step),
+        settings,
     )
-    derivative_two = _time_state_rhs(stage_two, geometry, settings)
+
+    derivative = _time_state_rhs(stage_two, geometry, settings)
     stage_three = _limit_time_state(
-        initial + _scale_cell_rate(derivative_two, 0.5 * time_step), settings
+        0.620101851488403 * initial
+        + 0.379898148511597 * stage_two
+        + _scale_cell_rate(derivative, 0.251891774271694 * time_step),
+        settings,
     )
+
     derivative_three = _time_state_rhs(stage_three, geometry, settings)
     stage_four = _limit_time_state(
-        initial + _scale_cell_rate(derivative_three, time_step), settings
+        0.178079954393132 * initial
+        + 0.821920045606868 * stage_three
+        + _scale_cell_rate(derivative_three, 0.544974750228521 * time_step),
+        settings,
     )
+
     derivative_four = _time_state_rhs(stage_four, geometry, settings)
     return _limit_time_state(
-        initial
-        + _scale_cell_rate(
-            derivative_one
-            + 2.0 * derivative_two
-            + 2.0 * derivative_three
-            + derivative_four,
-            time_step / 6.0,
-        ),
+        0.517231671970585 * stage_two
+        + 0.096059710526147 * stage_three
+        + _scale_cell_rate(derivative_three, 0.063692468666290 * time_step)
+        + 0.386708617503269 * stage_four
+        + _scale_cell_rate(derivative_four, 0.226007483236906 * time_step),
         settings,
     )
 
