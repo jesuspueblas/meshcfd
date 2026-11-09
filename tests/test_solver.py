@@ -4,7 +4,11 @@ from threading import Event, Thread
 import numpy as np
 import pytest
 
-from meshcfd.core._kernels import limited_gradient_factors, reconstruct_hllc_flux
+from meshcfd.core._kernels import (
+    limited_gradient_factors,
+    reconstruct_hllc_flux,
+    weighted_least_squares_gradients,
+)
 
 from meshcfd.core.adaptation import AdaptationBalanceError
 from meshcfd.core.euler import (
@@ -1740,3 +1744,42 @@ def test_compiled_reconstruction_hllc_matches_vectorized_reference():
     )
 
     np.testing.assert_allclose(actual, expected, rtol=2e-14, atol=2e-14)
+
+
+def test_compiled_weighted_least_squares_matches_numpy_reference():
+    source_ids = np.array((0, 0, 1, 1, 1, 2, 2, 2), dtype=int)
+    dx = np.array((1.0, 0.0, -1.0, 1.0, 0.0, -1.0, 0.0, 1.0))
+    dy = np.array((0.0, 1.0, 0.0, 0.0, 1.0, 0.0, -1.0, 1.0))
+    differences = np.column_stack(
+        (
+            np.linspace(-0.4, 0.7, len(source_ids)),
+            np.linspace(0.8, -0.2, len(source_ids)),
+            np.sin(np.arange(len(source_ids))),
+        )
+    )
+    weights = 1.0 / np.maximum(dx * dx + dy * dy, 1e-300)
+    xx = np.zeros(3)
+    xy = np.zeros(3)
+    yy = np.zeros(3)
+    rhs_x = np.zeros((3, 3))
+    rhs_y = np.zeros((3, 3))
+    np.add.at(xx, source_ids, weights * dx * dx)
+    np.add.at(xy, source_ids, weights * dx * dy)
+    np.add.at(yy, source_ids, weights * dy * dy)
+    np.add.at(rhs_x, source_ids, (weights * dx)[:, None] * differences)
+    np.add.at(rhs_y, source_ids, (weights * dy)[:, None] * differences)
+    expected = np.zeros((3, 3, 2))
+    determinant = xx * yy - xy * xy
+    valid = determinant > 1e-14 * np.maximum(xx * yy, 1e-300)
+    expected[valid, :, 0] = (
+        rhs_x[valid] * yy[valid, None] - rhs_y[valid] * xy[valid, None]
+    ) / determinant[valid, None]
+    expected[valid, :, 1] = (
+        rhs_y[valid] * xx[valid, None] - rhs_x[valid] * xy[valid, None]
+    ) / determinant[valid, None]
+
+    actual = weighted_least_squares_gradients(
+        3, source_ids, dx, dy, differences
+    )
+
+    np.testing.assert_allclose(actual, expected, rtol=2e-15, atol=2e-15)

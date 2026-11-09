@@ -158,3 +158,50 @@ def reconstruct_hllc_flux(
         star = np.array((factor, factor * star_ux, factor * star_uy, star_energy))
         fluxes[face] = physical + wave * (star - state)
     return fluxes
+
+
+@njit(cache=True)
+def weighted_least_squares_gradients(
+    cell_count: int,
+    source_ids: np.ndarray,
+    dx: np.ndarray,
+    dy: np.ndarray,
+    differences: np.ndarray,
+) -> np.ndarray:
+    """Compute multi-component weighted least-squares gradients in one pass."""
+    component_count = differences.shape[1]
+    xx = np.zeros(cell_count, dtype=np.float64)
+    xy = np.zeros(cell_count, dtype=np.float64)
+    yy = np.zeros(cell_count, dtype=np.float64)
+    rhs_x = np.zeros((cell_count, component_count), dtype=np.float64)
+    rhs_y = np.zeros((cell_count, component_count), dtype=np.float64)
+    for entry in range(source_ids.size):
+        cell = source_ids[entry]
+        delta_x = dx[entry]
+        delta_y = dy[entry]
+        weight = 1.0 / max(delta_x * delta_x + delta_y * delta_y, 1e-300)
+        weighted_x = weight * delta_x
+        weighted_y = weight * delta_y
+        xx[cell] += weighted_x * delta_x
+        xy[cell] += weighted_x * delta_y
+        yy[cell] += weighted_y * delta_y
+        for component in range(component_count):
+            difference = differences[entry, component]
+            rhs_x[cell, component] += weighted_x * difference
+            rhs_y[cell, component] += weighted_y * difference
+
+    gradients = np.zeros((cell_count, component_count, 2), dtype=np.float64)
+    for cell in range(cell_count):
+        determinant = xx[cell] * yy[cell] - xy[cell] * xy[cell]
+        if determinant > 1e-14 * max(xx[cell] * yy[cell], 1e-300):
+            inverse = 1.0 / determinant
+            for component in range(component_count):
+                gradients[cell, component, 0] = (
+                    rhs_x[cell, component] * yy[cell]
+                    - rhs_y[cell, component] * xy[cell]
+                ) * inverse
+                gradients[cell, component, 1] = (
+                    rhs_y[cell, component] * xx[cell]
+                    - rhs_x[cell, component] * xy[cell]
+                ) * inverse
+    return gradients

@@ -29,7 +29,11 @@ from meshcfd.core.euler import (
     primitive_to_conservative,
 )
 from meshcfd.core.initial_conditions import evaluate_initial_conditions
-from meshcfd.core._kernels import limited_gradient_factors, reconstruct_hllc_flux
+from meshcfd.core._kernels import (
+    limited_gradient_factors,
+    reconstruct_hllc_flux,
+    weighted_least_squares_gradients,
+)
 from meshcfd.core.model import (
     Case,
     FiniteVolumeMesh,
@@ -2996,29 +3000,11 @@ def _scalar_gradients(
     dx = np.concatenate(dx_parts)
     dy = np.concatenate(dy_parts)
     delta = np.vstack(differences)
-    gradients = np.zeros((cell_count, component_count, 2), dtype=float)
     if not len(source_ids):
-        return gradients
-    weights = 1.0 / np.maximum(dx * dx + dy * dy, 1e-300)
-    xx = np.zeros(cell_count)
-    xy = np.zeros(cell_count)
-    yy = np.zeros(cell_count)
-    rhs_x = np.zeros((cell_count, component_count))
-    rhs_y = np.zeros((cell_count, component_count))
-    np.add.at(xx, source_ids, weights * dx * dx)
-    np.add.at(xy, source_ids, weights * dx * dy)
-    np.add.at(yy, source_ids, weights * dy * dy)
-    np.add.at(rhs_x, source_ids, (weights * dx)[:, None] * delta)
-    np.add.at(rhs_y, source_ids, (weights * dy)[:, None] * delta)
-    determinant = xx * yy - xy * xy
-    valid = determinant > 1e-14 * np.maximum(xx * yy, 1e-300)
-    gradients[valid, :, 0] = (
-        rhs_x[valid] * yy[valid, None] - rhs_y[valid] * xy[valid, None]
-    ) / determinant[valid, None]
-    gradients[valid, :, 1] = (
-        rhs_y[valid] * xx[valid, None] - rhs_x[valid] * xy[valid, None]
-    ) / determinant[valid, None]
-    return gradients
+        return np.zeros((cell_count, component_count, 2), dtype=float)
+    return weighted_least_squares_gradients(
+        cell_count, source_ids, dx, dy, delta
+    )
 
 
 def _sst_omega_wall_scale(
@@ -3621,28 +3607,11 @@ def _viscous_gradients(
         dy = dy_values[0]
         differences = differences[0]
 
-    gradients = np.zeros((len(primitive), 3, 2), dtype=float)
-    if len(source_ids):
-        weights = 1.0 / np.maximum(dx * dx + dy * dy, 1e-300)
-        xx = np.zeros(len(primitive))
-        xy = np.zeros(len(primitive))
-        yy = np.zeros(len(primitive))
-        rhs_x = np.zeros((len(primitive), 3))
-        rhs_y = np.zeros((len(primitive), 3))
-        np.add.at(xx, source_ids, weights * dx * dx)
-        np.add.at(xy, source_ids, weights * dx * dy)
-        np.add.at(yy, source_ids, weights * dy * dy)
-        np.add.at(rhs_x, source_ids, (weights * dx)[:, None] * differences)
-        np.add.at(rhs_y, source_ids, (weights * dy)[:, None] * differences)
-        determinant = xx * yy - xy * xy
-        valid = determinant > 1e-14 * np.maximum(xx * yy, 1e-300)
-        gradients[valid, :, 0] = (
-            rhs_x[valid] * yy[valid, None] - rhs_y[valid] * xy[valid, None]
-        ) / determinant[valid, None]
-        gradients[valid, :, 1] = (
-            rhs_y[valid] * xx[valid, None] - rhs_x[valid] * xy[valid, None]
-        ) / determinant[valid, None]
-    return gradients
+    if not len(source_ids):
+        return np.zeros((len(primitive), 3, 2), dtype=float)
+    return weighted_least_squares_gradients(
+        len(primitive), source_ids, dx, dy, differences
+    )
 
 
 def _viscous_flux(
