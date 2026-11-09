@@ -3378,11 +3378,7 @@ def _sst_residual(
                 mass_flux[faces] >= 0.0, values[owners], values[neighbours]
             )
             flux[:, variable] = mass_flux[faces] * upwind
-        integrated = flux * geometry.face_lengths[faces, None]
-        np.add.at(derivative, owners, -integrated / geometry.areas[owners, None])
-        np.add.at(
-            derivative, neighbours, integrated / geometry.areas[neighbours, None]
-        )
+        derivative += geometry.interior_divergence_operator @ flux
     faces_a, faces_b = geometry.periodic_faces_a, geometry.periodic_faces_b
     if len(faces_a):
         owners_a, owners_b = geometry.owners[faces_a], geometry.owners[faces_b]
@@ -3442,11 +3438,7 @@ def _sst_residual(
         flux = coefficients * np.sum(
             face_gradient * geometry.face_normals[faces, None, :], axis=2
         )
-        integrated = flux * geometry.face_lengths[faces, None]
-        np.add.at(derivative, owners, integrated / geometry.areas[owners, None])
-        np.add.at(
-            derivative, neighbours, -integrated / geometry.areas[neighbours, None]
-        )
+        derivative -= geometry.interior_divergence_operator @ flux
     faces_a, faces_b = geometry.periodic_faces_a, geometry.periodic_faces_b
     if len(faces_a):
         owners_a, owners_b = geometry.owners[faces_a], geometry.owners[faces_b]
@@ -3742,18 +3734,17 @@ def _viscous_residual(
         face_conductivity = 0.5 * (
             conductivity[owners] + conductivity[neighbours]
         )
-        add_face_flux(
-            faces,
-            owners,
-            neighbours,
-            geometry.face_normals[faces],
+        flux = _viscous_flux(
             face_gradients,
             face_velocity,
             face_viscosity,
             face_conductivity,
+            geometry.interior_normals,
             face_rho_k,
-            turbulent_energy_flux,
         )
+        if turbulent_energy_flux is not None:
+            flux[:, 3] += turbulent_energy_flux
+        derivative -= geometry.interior_divergence_operator @ flux
     faces_a, faces_b = geometry.periodic_faces_a, geometry.periodic_faces_b
     if len(faces_a):
         owners_a, owners_b = geometry.owners[faces_a], geometry.owners[faces_b]

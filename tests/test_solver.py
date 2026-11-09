@@ -1783,3 +1783,26 @@ def test_compiled_weighted_least_squares_matches_numpy_reference():
     )
 
     np.testing.assert_allclose(actual, expected, rtol=2e-15, atol=2e-15)
+
+
+def test_interior_divergence_operator_matches_diffusive_add_at_sign():
+    case = make_periodic_case(4, 3)
+    geometry = _build_geometry(case.mesh, case)
+    face_count = len(geometry.interior_faces)
+    flux = np.arange(face_count * 2, dtype=float).reshape(face_count, 2) / 19.0
+    integrated = flux * geometry.interior_lengths[:, None]
+    expected = np.zeros((len(case.mesh.cells), 2))
+    np.add.at(
+        expected,
+        geometry.interior_owners,
+        integrated * geometry.inverse_areas[geometry.interior_owners, None],
+    )
+    np.add.at(
+        expected,
+        geometry.interior_neighbours,
+        -integrated * geometry.inverse_areas[geometry.interior_neighbours, None],
+    )
+
+    actual = -(geometry.interior_divergence_operator @ flux)
+
+    np.testing.assert_allclose(actual, expected, rtol=0.0, atol=1e-13)
