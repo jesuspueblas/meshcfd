@@ -233,3 +233,7 @@ From this directory:
 - `core` contains application data models and has no PyQt5 dependency.
 - `io` reads MeshCAD finite-volume mesh JSON and MeshCFD case JSON.
 - `gui` contains the PyQt5 application and visualization.
+
+## Performance benchmarks
+
+A reproducible benchmark suite is available in `benchmarks/`. It records geometry, residual, complete-solver timings, throughput, numerical residual norm, and environment metadata in JSON and CSV formats. See `benchmarks/README.md` for the measurement protocol.
