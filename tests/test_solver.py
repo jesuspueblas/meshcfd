@@ -6,6 +6,7 @@ import pytest
 
 from meshcfd.core._kernels import (
     limited_gradient_factors,
+    linear_gradients_and_factors,
     point_to_segments_minimum_distance,
     reconstruct_hllc_flux,
     weighted_least_squares_gradients,
@@ -1821,3 +1822,49 @@ def test_compiled_point_to_segment_distances_match_reference():
         expected = np.minimum(expected, np.linalg.norm(offsets - projection[:, None] * edge, axis=1))
     actual = point_to_segments_minimum_distance(points, starts, ends)
     np.testing.assert_allclose(actual, expected, rtol=0.0, atol=1e-15)
+
+
+def test_fused_linear_gradients_and_limiter_match_reference():
+    case = make_periodic_case(6, 5)
+    case.numerics.reconstruction = "MUSCL linear"
+    geometry = _build_geometry(case.mesh, case)
+    primitive = np.column_stack(
+        (
+            1.0 + 0.03 * np.sin(np.arange(30)),
+            0.25 + 0.05 * np.cos(0.3 * np.arange(30)),
+            -0.04 + 0.02 * np.sin(0.7 * np.arange(30)),
+            1.0 + 0.04 * np.cos(0.5 * np.arange(30)),
+        )
+    )
+    expected_gradients = np.zeros((30, 4, 2))
+    expected_gradients[:, :, 0] = geometry.gradient_operator_x @ primitive
+    expected_gradients[:, :, 1] = geometry.gradient_operator_y @ primitive
+    expected_factors = limited_gradient_factors(
+        primitive,
+        expected_gradients,
+        geometry.gradient_sources,
+        geometry.gradient_neighbours,
+        geometry.limiter_cells,
+        geometry.limiter_dx,
+        geometry.limiter_dy,
+        0,
+    )
+
+    actual_gradients, actual_factors = linear_gradients_and_factors(
+        primitive,
+        geometry.gradient_sources,
+        geometry.gradient_neighbours,
+        geometry.gradient_coefficients_x,
+        geometry.gradient_coefficients_y,
+        geometry.limiter_cells,
+        geometry.limiter_dx,
+        geometry.limiter_dy,
+        0,
+    )
+
+    np.testing.assert_allclose(
+        actual_gradients, expected_gradients, rtol=2e-14, atol=2e-14
+    )
+    np.testing.assert_allclose(
+        actual_factors, expected_factors, rtol=2e-13, atol=2e-13
+    )

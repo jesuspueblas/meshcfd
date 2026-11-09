@@ -31,6 +31,7 @@ from meshcfd.core.euler import (
 from meshcfd.core.initial_conditions import evaluate_initial_conditions
 from meshcfd.core._kernels import (
     limited_gradient_factors,
+    linear_gradients_and_factors,
     point_to_segments_minimum_distance,
     reconstruct_hllc_flux,
     weighted_least_squares_gradients,
@@ -158,6 +159,8 @@ class _Geometry:
     gradient_dy: np.ndarray
     gradient_operator_x: object
     gradient_operator_y: object
+    gradient_coefficients_x: np.ndarray
+    gradient_coefficients_y: np.ndarray
     parabolic_sources: np.ndarray
     parabolic_neighbours: np.ndarray
     parabolic_dx: np.ndarray
@@ -2139,6 +2142,8 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
         gradient_dy=gradient_dy_array,
         gradient_operator_x=gradient_operator_x,
         gradient_operator_y=gradient_operator_y,
+        gradient_coefficients_x=coefficients_x,
+        gradient_coefficients_y=coefficients_y,
         parabolic_sources=parabolic_sources,
         parabolic_neighbours=parabolic_neighbours,
         parabolic_dx=parabolic_dx,
@@ -2206,28 +2211,28 @@ def _limited_gradients(
     primitive: np.ndarray, geometry: _Geometry, limiter: str
 ) -> tuple[np.ndarray, np.ndarray]:
     cell_count = len(primitive)
-    gradients = np.zeros((cell_count, 4, 2), dtype=float)
     if len(geometry.gradient_sources) == 0:
-        return gradients, np.ones((cell_count, 4), dtype=float)
-    gradients[:, :, 0] = geometry.gradient_operator_x @ primitive
-    gradients[:, :, 1] = geometry.gradient_operator_y @ primitive
+        return (
+            np.zeros((cell_count, 4, 2), dtype=float),
+            np.ones((cell_count, 4), dtype=float),
+        )
     limiter_code = {
         "Barth-Jespersen": 0,
         "Minmod": 1,
         "Van Leer": 2,
         "Venkatakrishnan": 3,
     }[limiter]
-    factors = limited_gradient_factors(
+    return linear_gradients_and_factors(
         primitive,
-        gradients,
         geometry.gradient_sources,
         geometry.gradient_neighbours,
+        geometry.gradient_coefficients_x,
+        geometry.gradient_coefficients_y,
         geometry.limiter_cells,
         geometry.limiter_dx,
         geometry.limiter_dy,
         limiter_code,
     )
-    return gradients, factors
 
 
 def _parabolic_reconstruction(

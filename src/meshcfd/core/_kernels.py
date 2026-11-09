@@ -234,3 +234,40 @@ def point_to_segments_minimum_distance(
             if distance < distances[point]:
                 distances[point] = distance
     return distances
+
+
+@njit(cache=True)
+def linear_gradients_and_factors(
+    primitive: np.ndarray,
+    gradient_sources: np.ndarray,
+    gradient_neighbours: np.ndarray,
+    gradient_coefficients_x: np.ndarray,
+    gradient_coefficients_y: np.ndarray,
+    limiter_cells: np.ndarray,
+    limiter_dx: np.ndarray,
+    limiter_dy: np.ndarray,
+    limiter_code: int,
+):
+    """Compute linear least-squares gradients and limiter factors in one pass."""
+    cell_count, variable_count = primitive.shape
+    gradients = np.zeros((cell_count, variable_count, 2), dtype=np.float64)
+    for entry in range(gradient_sources.size):
+        source = gradient_sources[entry]
+        neighbour = gradient_neighbours[entry]
+        coefficient_x = gradient_coefficients_x[entry]
+        coefficient_y = gradient_coefficients_y[entry]
+        for variable in range(variable_count):
+            difference = primitive[neighbour, variable] - primitive[source, variable]
+            gradients[source, variable, 0] += coefficient_x * difference
+            gradients[source, variable, 1] += coefficient_y * difference
+    factors = limited_gradient_factors(
+        primitive,
+        gradients,
+        gradient_sources,
+        gradient_neighbours,
+        limiter_cells,
+        limiter_dx,
+        limiter_dy,
+        limiter_code,
+    )
+    return gradients, factors
