@@ -1549,3 +1549,33 @@ def test_sst_solver_advances_with_supported_wall_formulations(
         )
         for state in result.states
     )
+
+
+def test_geometry_builds_parabolic_stencil_only_when_requested(monkeypatch):
+    case = make_periodic_case(3, 2)
+    original = __import__(
+        "meshcfd.core.solver", fromlist=["_parabolic_stencil"]
+    )._parabolic_stencil
+    calls = []
+
+    def track_parabolic_stencil(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "meshcfd.core.solver._parabolic_stencil", track_parabolic_stencil
+    )
+
+    case.numerics.reconstruction = "MUSCL linear"
+    linear_geometry = _build_geometry(case.mesh, case)
+    assert not calls
+    assert linear_geometry.parabolic_sources.size == 0
+    assert linear_geometry.parabolic_neighbours.size == 0
+    assert linear_geometry.parabolic_dx.size == 0
+    assert linear_geometry.parabolic_dy.size == 0
+
+    case.numerics.reconstruction = "MUSCL parabolic"
+    parabolic_geometry = _build_geometry(case.mesh, case)
+    assert len(calls) == 1
+    assert parabolic_geometry.parabolic_sources.size > 0
+    assert parabolic_geometry.parabolic_neighbours.size > 0

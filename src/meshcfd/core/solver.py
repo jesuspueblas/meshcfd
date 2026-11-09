@@ -1972,23 +1972,29 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
         gradient_neighbours.extend((owner_b, owner_a))
         gradient_dx.extend((delta[0], -delta[0]))
         gradient_dy.extend((delta[1], -delta[1]))
-    (
-        parabolic_sources,
-        parabolic_neighbours,
-        parabolic_dx,
-        parabolic_dy,
-    ) = _parabolic_stencil(
-        len(mesh.cells),
-        gradient_sources,
-        gradient_neighbours,
-        gradient_dx,
-        gradient_dy,
-        max(
-            max(x for x, _ in mesh.points) - min(x for x, _ in mesh.points),
-            max(y for _, y in mesh.points) - min(y for _, y in mesh.points),
-            1e-12,
-        ),
-    )
+    if case.numerics.reconstruction == "MUSCL parabolic":
+        (
+            parabolic_sources,
+            parabolic_neighbours,
+            parabolic_dx,
+            parabolic_dy,
+        ) = _parabolic_stencil(
+            len(mesh.cells),
+            gradient_sources,
+            gradient_neighbours,
+            gradient_dx,
+            gradient_dy,
+            max(
+                max(x for x, _ in mesh.points) - min(x for x, _ in mesh.points),
+                max(y for _, y in mesh.points) - min(y for _, y in mesh.points),
+                1e-12,
+            ),
+        )
+    else:
+        parabolic_sources = np.empty(0, dtype=int)
+        parabolic_neighbours = np.empty(0, dtype=int)
+        parabolic_dx = np.empty(0, dtype=float)
+        parabolic_dy = np.empty(0, dtype=float)
 
     limiter_cells = list(owners)
     limiter_dx = list(np.asarray(face_centers)[:, 0] - centers[owners, 0])
