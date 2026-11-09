@@ -4,6 +4,8 @@ from threading import Event, Thread
 import numpy as np
 import pytest
 
+from meshcfd.core._kernels import limited_gradient_factors
+
 from meshcfd.core.adaptation import AdaptationBalanceError
 from meshcfd.core.euler import (
     numerical_flux,
@@ -1628,3 +1630,69 @@ def test_interior_divergence_operator_matches_add_at_assembly():
     actual = geometry.interior_divergence_operator @ flux
 
     np.testing.assert_allclose(actual, expected, rtol=0.0, atol=1e-13)
+
+
+def test_compiled_limiter_matches_numpy_reference_for_all_schemes():
+    case = make_periodic_case(5, 4)
+    case.numerics.reconstruction = "MUSCL linear"
+    geometry = _build_geometry(case.mesh, case)
+    primitive = np.column_stack(
+        (
+            1.0 + 0.1 * np.sin(np.arange(20)),
+            0.2 + 0.03 * np.cos(np.arange(20)),
+            -0.1 + 0.02 * np.sin(0.7 * np.arange(20)),
+            1.0 + 0.05 * np.cos(0.4 * np.arange(20)),
+        )
+    )
+    gradients = np.empty((20, 4, 2))
+    gradients[:, :, 0] = geometry.gradient_operator_x @ primitive
+    gradients[:, :, 1] = geometry.gradient_operator_y @ primitive
+
+    sources = geometry.gradient_sources
+    neighbours = geometry.gradient_neighbours
+    cells = geometry.limiter_cells
+    local_min = primitive.copy()
+    local_max = primitive.copy()
+    np.minimum.at(local_min, sources, primitive[neighbours])
+    np.maximum.at(local_max, sources, primitive[neighbours])
+    increments = (
+        gradients[cells, :, 0] * geometry.limiter_dx[:, None]
+        + gradients[cells, :, 1] * geometry.limiter_dy[:, None]
+    )
+    cell_values = primitive[cells]
+    tolerance = 1e-14 * np.maximum(np.abs(cell_values), 1.0)
+    positive = increments > tolerance
+    negative = increments < -tolerance
+    ratio = np.ones_like(increments)
+    np.divide(local_max[cells] - cell_values, increments, out=ratio, where=positive)
+    np.divide(local_min[cells] - cell_values, increments, out=ratio, where=negative)
+    ratio = np.maximum(ratio, 0.0)
+
+    for limiter_code in range(4):
+        if limiter_code <= 1:
+            face_limiter = np.minimum(ratio, 1.0)
+        elif limiter_code == 2:
+            face_limiter = np.where(
+                ratio > 0.0, np.minimum(1.0, 2.0 * ratio / (1.0 + ratio)), 0.0
+            )
+        else:
+            epsilon = 1e-12
+            face_limiter = (ratio**2 + 2.0 * ratio + epsilon) / (
+                ratio**2 + ratio + 2.0 + epsilon
+            )
+            face_limiter = np.minimum(face_limiter, 1.0)
+        expected = np.ones((20, 4))
+        np.minimum.at(expected, cells, face_limiter)
+
+        actual = limited_gradient_factors(
+            primitive,
+            gradients,
+            sources,
+            neighbours,
+            cells,
+            geometry.limiter_dx,
+            geometry.limiter_dy,
+            limiter_code,
+        )
+
+        np.testing.assert_array_equal(actual, expected)

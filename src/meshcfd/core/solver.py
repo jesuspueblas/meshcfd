@@ -29,6 +29,7 @@ from meshcfd.core.euler import (
     primitive_to_conservative,
 )
 from meshcfd.core.initial_conditions import evaluate_initial_conditions
+from meshcfd.core._kernels import limited_gradient_factors
 from meshcfd.core.model import (
     Case,
     FiniteVolumeMesh,
@@ -2209,45 +2210,26 @@ def _limited_gradients(
 ) -> tuple[np.ndarray, np.ndarray]:
     cell_count = len(primitive)
     gradients = np.zeros((cell_count, 4, 2), dtype=float)
-    sources = geometry.gradient_sources
-    if len(sources) == 0:
+    if len(geometry.gradient_sources) == 0:
         return gradients, np.ones((cell_count, 4), dtype=float)
-    neighbours = geometry.gradient_neighbours
     gradients[:, :, 0] = geometry.gradient_operator_x @ primitive
     gradients[:, :, 1] = geometry.gradient_operator_y @ primitive
-
-    local_min = primitive.copy()
-    local_max = primitive.copy()
-    np.minimum.at(local_min, sources, primitive[neighbours])
-    np.maximum.at(local_max, sources, primitive[neighbours])
-    cells = geometry.limiter_cells
-    increments = (
-        gradients[cells, :, 0] * geometry.limiter_dx[:, None]
-        + gradients[cells, :, 1] * geometry.limiter_dy[:, None]
+    limiter_code = {
+        "Barth-Jespersen": 0,
+        "Minmod": 1,
+        "Van Leer": 2,
+        "Venkatakrishnan": 3,
+    }[limiter]
+    factors = limited_gradient_factors(
+        primitive,
+        gradients,
+        geometry.gradient_sources,
+        geometry.gradient_neighbours,
+        geometry.limiter_cells,
+        geometry.limiter_dx,
+        geometry.limiter_dy,
+        limiter_code,
     )
-    cell_values = primitive[cells]
-    positive = increments > 1e-14 * np.maximum(np.abs(cell_values), 1.0)
-    negative = increments < -1e-14 * np.maximum(np.abs(cell_values), 1.0)
-    ratio = np.ones_like(increments)
-    upper = np.broadcast_to(local_max[cells] - cell_values, increments.shape)
-    lower = np.broadcast_to(local_min[cells] - cell_values, increments.shape)
-    np.divide(upper, increments, out=ratio, where=positive)
-    np.divide(lower, increments, out=ratio, where=negative)
-    ratio = np.maximum(ratio, 0.0)
-    if limiter in ("Barth-Jespersen", "Minmod"):
-        face_limiter = np.minimum(ratio, 1.0)
-    elif limiter == "Van Leer":
-        face_limiter = np.where(
-            ratio > 0.0, np.minimum(1.0, 2.0 * ratio / (1.0 + ratio)), 0.0
-        )
-    else:
-        epsilon = 1e-12
-        face_limiter = (
-            ratio**2 + 2.0 * ratio + epsilon
-        ) / (ratio**2 + ratio + 2.0 + epsilon)
-        face_limiter = np.minimum(face_limiter, 1.0)
-    factors = np.ones((cell_count, 4), dtype=float)
-    np.minimum.at(factors, cells, face_limiter)
     return gradients, factors
 
 
