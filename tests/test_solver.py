@@ -1603,3 +1603,28 @@ def test_geometry_precomputes_interior_face_data():
         geometry.interior_neighbour_offsets,
         geometry.face_centers[faces] - geometry.centers[neighbours],
     )
+
+
+def test_interior_divergence_operator_matches_add_at_assembly():
+    case = make_periodic_case(4, 3)
+    case.numerics.reconstruction = "MUSCL linear"
+    geometry = _build_geometry(case.mesh, case)
+    face_count = len(geometry.interior_faces)
+    flux = np.arange(face_count * 4, dtype=float).reshape(face_count, 4) / 17.0
+
+    expected = np.zeros((len(case.mesh.cells), 4))
+    integrated = flux * geometry.interior_lengths[:, None]
+    np.add.at(
+        expected,
+        geometry.interior_owners,
+        -integrated * geometry.inverse_areas[geometry.interior_owners, None],
+    )
+    np.add.at(
+        expected,
+        geometry.interior_neighbours,
+        integrated * geometry.inverse_areas[geometry.interior_neighbours, None],
+    )
+
+    actual = geometry.interior_divergence_operator @ flux
+
+    np.testing.assert_allclose(actual, expected, rtol=0.0, atol=1e-13)

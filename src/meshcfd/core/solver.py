@@ -128,6 +128,7 @@ class _Geometry:
     interior_lengths: np.ndarray
     interior_owner_offsets: np.ndarray
     interior_neighbour_offsets: np.ndarray
+    interior_divergence_operator: object
     wall_faces: np.ndarray
     symmetry_faces: np.ndarray
     diffusive_boundary_faces: np.ndarray
@@ -2071,6 +2072,22 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
     face_lengths_array = np.asarray(face_lengths)
     interior_owners = owners[interior_faces]
     interior_neighbours = neighbours[interior_faces]
+    interior_face_ids = np.arange(len(interior_faces), dtype=int)
+    interior_divergence_operator = coo_matrix(
+        (
+            np.concatenate(
+                (
+                    -face_lengths_array[interior_faces] / areas[interior_owners],
+                    face_lengths_array[interior_faces] / areas[interior_neighbours],
+                )
+            ),
+            (
+                np.concatenate((interior_owners, interior_neighbours)),
+                np.concatenate((interior_face_ids, interior_face_ids)),
+            ),
+        ),
+        shape=(len(mesh.cells), len(interior_faces)),
+    ).tocsr()
 
     return _Geometry(
         centers=centers,
@@ -2096,6 +2113,7 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
         interior_neighbour_offsets=(
             face_centers_array[interior_faces] - centers[interior_neighbours]
         ),
+        interior_divergence_operator=interior_divergence_operator,
         wall_faces=wall_faces,
         symmetry_faces=symmetry_faces,
         diffusive_boundary_faces=diffusive_boundary_faces,
@@ -2399,15 +2417,7 @@ def _residual(
             flux[:, 3] += flux[:, 0] * np.where(
                 flux[:, 0] >= 0.0, turbulence[owners, 0], turbulence[neighbours, 0]
             )
-        integrated = flux * geometry.interior_lengths[:, None]
-        np.add.at(
-            derivative, owners, -integrated * geometry.inverse_areas[owners, None]
-        )
-        np.add.at(
-            derivative,
-            neighbours,
-            integrated * geometry.inverse_areas[neighbours, None],
-        )
+        derivative += geometry.interior_divergence_operator @ flux
     if len(geometry.periodic_faces_a):
         faces_a, faces_b = geometry.periodic_faces_a, geometry.periodic_faces_b
         owners_a, owners_b = geometry.owners[faces_a], geometry.owners[faces_b]
