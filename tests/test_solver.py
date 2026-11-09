@@ -11,7 +11,6 @@ from meshcfd.core._kernels import (
     reconstruct_hllc_flux,
     weighted_least_squares_gradients,
 )
-
 from meshcfd.core.adaptation import AdaptationBalanceError
 from meshcfd.core.euler import (
     numerical_flux,
@@ -33,13 +32,13 @@ from meshcfd.core.solver import (
     _dynamic_viscosity,
     _far_field_boundary_states,
     _implicit_euler_step,
-    _mass_flow_inlet_boundary_states,
     _limited_gradients,
+    _mass_flow_inlet_boundary_states,
     _mass_flow_outlet_boundary_states,
     _parabolic_reconstruction,
     _pressure_inlet_boundary_states,
-    _reconstruct,
     _primitive_from_conservative,
+    _reconstruct,
     _residual,
     _sst_fields,
     _sst_omega_wall_scale,
@@ -49,6 +48,7 @@ from meshcfd.core.solver import (
     _sst_wall_values,
     _turbulence_boundary_values,
     _viscous_flux,
+    _viscous_gradients,
     derive_solution_fields,
     solve_case,
 )
@@ -216,6 +216,50 @@ def test_sst_closure_returns_finite_turbulent_viscosity():
     assert fields[0][0] == pytest.approx(0.001)
     assert np.isfinite(fields[0]).all()
     assert np.all(fields[0] >= 0.0)
+
+
+def test_prescribed_wall_velocity_expression_sets_viscous_wall_state():
+    case = make_periodic_case(2, 2)
+    case.periodic_pairs.clear()
+    for boundary in case.boundary_conditions:
+        boundary.kind = "Wall"
+    top_wall = case.boundary_conditions[2]
+    top_wall.mechanical_condition = "Prescribed velocity"
+    top_wall.values.update(
+        wall_velocity_x_expression="2.0 + x",
+        wall_velocity_y_expression="0",
+    )
+    case.numerics.viscosity_model = "Constant"
+    case.numerics.dynamic_viscosity = 1e-3
+    geometry = _build_geometry(case.mesh, case)
+
+    top_faces = np.flatnonzero(
+        (geometry.patch_ids == top_wall.patch_id)
+        & (geometry.neighbours < 0)
+    )
+    np.testing.assert_allclose(
+        geometry.wall_velocities[top_faces, 0],
+        2.0 + geometry.face_centers[top_faces, 0],
+    )
+    np.testing.assert_allclose(geometry.wall_velocities[top_faces, 1], 0.0)
+
+    primitive = np.tile((1.0, 0.0, 0.0, 1.0), (len(geometry.centers), 1))
+    gradients = _viscous_gradients(primitive, geometry, case.numerics)
+    top_owners = geometry.owners[top_faces]
+    assert np.all(gradients[top_owners, 0, 1] > 0.0)
+
+
+def test_prescribed_wall_velocity_rejects_normal_component():
+    case = make_periodic_case(1, 1)
+    case.periodic_pairs.clear()
+    for boundary in case.boundary_conditions:
+        boundary.kind = "Wall"
+    top_wall = case.boundary_conditions[2]
+    top_wall.mechanical_condition = "Prescribed velocity"
+    top_wall.values["wall_velocity_y_expression"] = "1"
+
+    with pytest.raises(SolverError, match="must be tangential"):
+        _build_geometry(case.mesh, case)
 
 
 def test_regularized_sst_variable_uses_article_wall_asymptote():

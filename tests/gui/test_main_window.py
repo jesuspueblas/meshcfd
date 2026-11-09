@@ -756,6 +756,43 @@ def test_wall_thermal_condition_selects_temperature_or_heat_flux(
     window._dirty = False
 
 
+def test_wall_prescribed_velocity_expressions_are_editable(qtbot, monkeypatch):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    monkeypatch.setattr(window, "_confirm_discard_changes", lambda: True)
+    case = Case()
+    case.set_mesh(make_mesh())
+    window._set_case(case, None)
+
+    panel = window.boundary_panel
+    panel.patch_list.setCurrentRow(0)
+    assert "Prescribed velocity" in [
+        panel.wall_mechanical_combo.itemText(index)
+        for index in range(panel.wall_mechanical_combo.count())
+    ]
+    panel.wall_mechanical_combo.setCurrentText("Prescribed velocity")
+
+    assert set(panel.wall_velocity_expression_controls) == {
+        "wall_velocity_x_expression",
+        "wall_velocity_y_expression",
+    }
+    x_expression = panel.wall_velocity_expression_controls[
+        "wall_velocity_x_expression"
+    ]
+    assert panel.wall_velocity_expression_controls[
+        "wall_velocity_y_expression"
+    ].text() == "0"
+    x_expression.setText("2.0 + x")
+    x_expression.editingFinished.emit()
+    condition = window.case.boundary_conditions[0]
+    assert condition.mechanical_condition == "Prescribed velocity"
+    assert condition.values["wall_velocity_x_expression"] == "2.0 + x"
+
+    panel.wall_mechanical_combo.setCurrentText("Slip")
+    assert not panel.wall_velocity_expression_controls
+    window._dirty = False
+
+
 def test_muscl_parabolic_reconstruction_is_available(qtbot):
     window = MainWindow()
     qtbot.addWidget(window)

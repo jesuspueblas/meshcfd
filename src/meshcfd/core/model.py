@@ -20,6 +20,10 @@ BOUNDARY_TYPES = (
 
 RECONSTRUCTION_SCHEMES = ("First order", "MUSCL linear", "MUSCL parabolic")
 LIMITER_SCHEMES = ("Barth-Jespersen", "Venkatakrishnan", "Minmod", "Van Leer")
+WALL_VELOCITY_EXPRESSION_KEYS = (
+    "wall_velocity_x_expression",
+    "wall_velocity_y_expression",
+)
 FLUX_SCHEMES = ("HLLC", "Roe", "Rusanov")
 TIME_INTEGRATION_SCHEMES = (
     "Explicit Euler",
@@ -75,7 +79,7 @@ class BoundaryCondition:
     patch_id: int
     patch_name: str
     kind: str = "Wall"
-    values: dict[str, float] = field(default_factory=dict)
+    values: dict[str, float | str] = field(default_factory=dict)
     thermal_condition: str = "Temperature"
     mechanical_condition: str = "No-slip"
 

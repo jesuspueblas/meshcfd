@@ -10,6 +10,7 @@ from PyQt5.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QPushButton,
@@ -19,6 +20,7 @@ from PyQt5.QtWidgets import (
 
 from meshcfd.core.model import (
     BOUNDARY_TYPES,
+    WALL_VELOCITY_EXPRESSION_KEYS,
     BoundaryCondition,
     Case,
     PeriodicBoundaryPair,
@@ -88,6 +90,7 @@ class BoundaryPanel(QWidget):
         self.kind_combo.addItems(BOUNDARY_TYPES)
         self.form.addRow("Boundary type:", self.kind_combo)
         self.value_controls: dict[str, QDoubleSpinBox] = {}
+        self.wall_velocity_expression_controls: dict[str, QLineEdit] = {}
         self.wall_mechanical_combo: QComboBox | None = None
         self.wall_thermal_combo: QComboBox | None = None
         self.kind_combo.currentTextChanged.connect(self._change_kind)
@@ -312,6 +315,9 @@ class BoundaryPanel(QWidget):
         for control in self.value_controls.values():
             self.form.removeRow(control)
         self.value_controls.clear()
+        for control in self.wall_velocity_expression_controls.values():
+            self.form.removeRow(control)
+        self.wall_velocity_expression_controls.clear()
         condition = self._active_condition
         if (
             self.wall_mechanical_combo is not None
@@ -331,11 +337,15 @@ class BoundaryPanel(QWidget):
         if condition.kind == "Wall":
             if self.wall_mechanical_combo is None:
                 self.wall_mechanical_combo = QComboBox(self.editor)
-                self.wall_mechanical_combo.addItems(("Slip", "No-slip"))
+                self.wall_mechanical_combo.addItems(
+                    ("Slip", "No-slip", "Prescribed velocity")
+                )
                 self.wall_mechanical_combo.currentTextChanged.connect(
                     self._set_wall_mechanical_condition
                 )
-                self.form.addRow("Mechanical wall condition:", self.wall_mechanical_combo)
+                self.form.addRow(
+                    "Mechanical wall condition:", self.wall_mechanical_combo
+                )
             self.wall_mechanical_combo.blockSignals(True)
             self.wall_mechanical_combo.setCurrentText(
                 condition.mechanical_condition
@@ -356,6 +366,24 @@ class BoundaryPanel(QWidget):
                 if condition.thermal_condition == "Temperature"
                 else BOUNDARY_FIELDS["Wall Heat Flux"]
             )
+            if condition.mechanical_condition == "Prescribed velocity":
+                for key, label in zip(
+                    WALL_VELOCITY_EXPRESSION_KEYS, ("Wall velocity X", "Wall velocity Y")
+                ):
+                    control = QLineEdit(
+                        str(condition.values.get(key, "0")), self.editor
+                    )
+                    control.setToolTip(
+                        f"Safe expression for {label.lower()} in m/s, evaluated "
+                        "at each wall-face center using x and y."
+                    )
+                    control.editingFinished.connect(
+                        lambda field=key, line=control: self._set_wall_velocity_expression(
+                            field, line.text()
+                        )
+                    )
+                    self.form.addRow(f"{label} expression:", control)
+                    self.wall_velocity_expression_controls[key] = control
         if self.case.numerics.turbulence_model != "Menter k-omega SST":
             fields = tuple(
                 field
@@ -430,6 +458,13 @@ class BoundaryPanel(QWidget):
         if self._active_condition is None:
             return
         self._active_condition.mechanical_condition = value
+        self._rebuild_value_fields()
+        self.changed.emit()
+
+    def _set_wall_velocity_expression(self, key: str, value: str) -> None:
+        if self._active_condition is None:
+            return
+        self._active_condition.values[key] = value
         self.changed.emit()
 
     def _set_value(self, key: str, value: float) -> None:

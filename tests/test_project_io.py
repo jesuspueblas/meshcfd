@@ -72,6 +72,11 @@ def test_case_round_trip_keeps_mesh_and_setup(tmp_path):
     case.boundary_conditions[0].thermal_condition = "Heat Flux"
     case.boundary_conditions[0].mechanical_condition = "Slip"
     case.boundary_conditions[0].values["heat_flux"] = 250.0
+    case.boundary_conditions[2].mechanical_condition = "Prescribed velocity"
+    case.boundary_conditions[2].values.update(
+        wall_velocity_x_expression="2.0 + x",
+        wall_velocity_y_expression="0",
+    )
     path = tmp_path / "channel.mcf.json"
 
     save_case(path, case)
@@ -96,6 +101,12 @@ def test_case_round_trip_keeps_mesh_and_setup(tmp_path):
     assert restored.boundary_conditions[0].thermal_condition == "Heat Flux"
     assert restored.boundary_conditions[0].mechanical_condition == "Slip"
     assert restored.boundary_conditions[0].values["heat_flux"] == 250.0
+    assert restored.boundary_conditions[2].mechanical_condition == (
+        "Prescribed velocity"
+    )
+    assert restored.boundary_conditions[2].values["wall_velocity_x_expression"] == (
+        "2.0 + x"
+    )
 
 
 def test_version_six_case_loads_with_inviscid_defaults():

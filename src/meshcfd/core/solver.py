@@ -17,6 +17,12 @@ from scipy.sparse.linalg import (
     spsolve_triangular,
 )
 
+from meshcfd.core._kernels import (
+    linear_gradients_and_factors,
+    point_to_segments_minimum_distance,
+    reconstruct_hllc_flux,
+    weighted_least_squares_gradients,
+)
 from meshcfd.core.adaptation import (
     AdaptationBalanceError,
     adapt_mesh,
@@ -28,15 +34,10 @@ from meshcfd.core.euler import (
     numerical_flux,
     primitive_to_conservative,
 )
+from meshcfd.core.expressions import ExpressionError, compile_expression
 from meshcfd.core.initial_conditions import evaluate_initial_conditions
-from meshcfd.core._kernels import (
-    limited_gradient_factors,
-    linear_gradients_and_factors,
-    point_to_segments_minimum_distance,
-    reconstruct_hllc_flux,
-    weighted_least_squares_gradients,
-)
 from meshcfd.core.model import (
+    WALL_VELOCITY_EXPRESSION_KEYS,
     Case,
     FiniteVolumeMesh,
     InitialState,
@@ -48,6 +49,10 @@ from meshcfd.core.periodic import detect_periodic_pair, match_periodic_faces
 
 class SolverError(ValueError):
     """Raised when a case cannot be advanced by the Euler solver."""
+
+
+def _is_no_slip_wall(mechanical_condition: str) -> bool:
+    return mechanical_condition in ("No-slip", "Prescribed velocity")
 
 
 @dataclass(frozen=True)
@@ -122,6 +127,7 @@ class _Geometry:
     face_centers: np.ndarray
     face_normals: np.ndarray
     face_lengths: np.ndarray
+    wall_velocities: np.ndarray
     owners: np.ndarray
     neighbours: np.ndarray
     patch_ids: np.ndarray
@@ -1787,7 +1793,9 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
             for face_id in boundary_faces
             if int(face_id) not in periodic_face_set
             and conditions[int(patch_ids[face_id])].kind == "Wall"
-            and conditions[int(patch_ids[face_id])].mechanical_condition == "No-slip"
+            and _is_no_slip_wall(
+                conditions[int(patch_ids[face_id])].mechanical_condition
+            )
         ],
         dtype=int,
     )
@@ -1879,7 +1887,11 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
             )
         elif condition.kind == "Wall" and case.numerics.viscosity_model != "Inviscid":
             mechanical_condition = condition.mechanical_condition
-            if mechanical_condition not in ("Slip", "No-slip"):
+            if mechanical_condition not in (
+                "Slip",
+                "No-slip",
+                "Prescribed velocity",
+            ):
                 raise SolverError(
                     f"Unsupported mechanical condition on wall "
                     f"'{condition.patch_name}'."
@@ -2095,6 +2107,53 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
     face_centers_array = np.asarray(face_centers)
     face_normals_array = np.asarray(face_normals)
     face_lengths_array = np.asarray(face_lengths)
+    wall_velocities = np.zeros((len(face_centers_array), 2), dtype=float)
+    for condition in conditions.values():
+        if (
+            condition.kind != "Wall"
+            or condition.mechanical_condition != "Prescribed velocity"
+        ):
+            continue
+        expressions = []
+        for key in WALL_VELOCITY_EXPRESSION_KEYS:
+            source = condition.values.get(key, "0")
+            if not isinstance(source, str):
+                raise SolverError(
+                    f"Prescribed wall velocity expression '{key}' on "
+                    f"'{condition.patch_name}' must be a string."
+                )
+            try:
+                expressions.append(compile_expression(source))
+            except ExpressionError as error:
+                raise SolverError(
+                    f"Invalid prescribed wall velocity on "
+                    f"'{condition.patch_name}': {error}"
+                ) from error
+        faces = np.flatnonzero(
+            (patch_ids == condition.patch_id) & (neighbours < 0)
+        )
+        for face_id in faces:
+            x, y = face_centers_array[face_id]
+            try:
+                velocity = np.asarray(
+                    [
+                        expression.evaluate(float(x), float(y))
+                        for expression in expressions
+                    ],
+                    dtype=float,
+                )
+            except ExpressionError as error:
+                raise SolverError(
+                    f"Could not evaluate prescribed wall velocity on "
+                    f"'{condition.patch_name}', face {face_id}: {error}"
+                ) from error
+            normal_velocity = float(np.dot(velocity, face_normals_array[face_id]))
+            if abs(normal_velocity) > 1e-10 * max(1.0, float(np.linalg.norm(velocity))):
+                raise SolverError(
+                    f"Prescribed velocity on wall '{condition.patch_name}' "
+                    "must be tangential to the fixed mesh wall."
+                )
+            wall_velocities[face_id] = velocity
     interior_owners = owners[interior_faces]
     interior_neighbours = neighbours[interior_faces]
     interior_face_ids = np.arange(len(interior_faces), dtype=int)
@@ -2121,6 +2180,7 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
         face_centers=face_centers_array,
         face_normals=face_normals_array,
         face_lengths=face_lengths_array,
+        wall_velocities=wall_velocities,
         owners=owners,
         neighbours=neighbours,
         patch_ids=patch_ids,
@@ -2474,10 +2534,13 @@ def _residual(
             geometry.face_centers[faces] - geometry.centers[owners],
         )
         right = left.copy()
+        relative_velocity = left[:, 1:3] - geometry.wall_velocities[faces]
         normal_velocity = np.sum(
-            left[:, 1:3] * geometry.face_normals[faces], axis=1
+            relative_velocity * geometry.face_normals[faces], axis=1
         )
-        right[:, 1:3] -= 2.0 * normal_velocity[:, None] * geometry.face_normals[faces]
+        right[:, 1:3] -= (
+            2.0 * normal_velocity[:, None] * geometry.face_normals[faces]
+        )
         flux = numerical_flux(
             left, right, geometry.face_normals[faces], gamma, settings.flux
         )
@@ -2757,6 +2820,12 @@ def derive_solution_fields(
     if len(states) != len(case.mesh.cells):
         raise SolverError("Solution state count must match the mesh cell count.")
     settings = case.numerics
+    geometry = (
+        _build_geometry(case.mesh, case)
+        if settings.viscosity_model != "Inviscid"
+        or settings.turbulence_model == "Menter k-omega SST"
+        else None
+    )
     if settings.gamma <= 1.0 or settings.gas_constant <= 0.0:
         raise SolverError("Derived fields require gamma > 1 and a positive gas constant.")
     primitive = np.asarray(
@@ -2784,6 +2853,8 @@ def derive_solution_fields(
     y_plus = np.zeros(len(states), dtype=float)
 
     if settings.viscosity_model != "Inviscid":
+        if geometry is None:
+            raise SolverError("Wall visualization requires mesh geometry.")
         temperature = np.maximum(temperature, 1e-12)
         viscosity = _dynamic_viscosity(temperature, settings)
         if not np.isfinite(viscosity).all() or np.any(viscosity <= 0.0):
@@ -2811,17 +2882,18 @@ def derive_solution_fields(
         conditions = {
             boundary.patch_id: boundary for boundary in case.boundary_conditions
         }
-        closest_wall: dict[int, tuple[float, np.ndarray]] = {}
+        closest_wall: dict[int, tuple[float, np.ndarray, int]] = {}
         no_slip_faces = [
             face_id
             for face_id, neighbour in enumerate(case.mesh.face_neighbours)
             if neighbour < 0
             and int(case.mesh.face_patch_ids[face_id]) in conditions
             and conditions[int(case.mesh.face_patch_ids[face_id])].kind == "Wall"
-            and conditions[
-                int(case.mesh.face_patch_ids[face_id])
-            ].mechanical_condition
-            == "No-slip"
+            and _is_no_slip_wall(
+                conditions[
+                    int(case.mesh.face_patch_ids[face_id])
+                ].mechanical_condition
+            )
         ]
         for face_id in no_slip_faces:
             owner = case.mesh.face_owners[face_id]
@@ -2839,11 +2911,15 @@ def derive_solution_fields(
             if distance <= 1e-14:
                 raise SolverError("Wall face has invalid cell-center distance.")
             if owner not in closest_wall or distance < closest_wall[owner][0]:
-                closest_wall[owner] = (distance, normal)
+                closest_wall[owner] = (distance, normal, face_id)
 
-        for owner, (distance, normal) in closest_wall.items():
+        for owner, (distance, normal, face_id) in closest_wall.items():
             velocity = primitive[owner, 1:3]
-            tangential_velocity = velocity - float(np.dot(velocity, normal)) * normal
+            wall_velocity = geometry.wall_velocities[face_id]
+            relative_velocity = velocity - wall_velocity
+            tangential_velocity = relative_velocity - float(
+                np.dot(relative_velocity, normal)
+            ) * normal
             speed = float(np.linalg.norm(tangential_velocity))
             if (
                 settings.turbulence_model == "Menter k-omega SST"
@@ -2870,7 +2946,8 @@ def derive_solution_fields(
         "y_plus": y_plus,
     }
     if settings.turbulence_model == "Menter k-omega SST":
-        geometry = _build_geometry(case.mesh, case)
+        if geometry is None:
+            raise SolverError("SST visualization requires mesh geometry.")
         fields["wall_distance"] = geometry.wall_distances
         if settings.turbulence_omega_formulation == "Regularized k-log-omega":
             turbulence_omega = np.asarray(
@@ -2903,7 +2980,7 @@ def _sst_wall_values(
     viscosity = _dynamic_viscosity(temperature, settings)
     wall_values = {}
     for boundary in geometry.wall_thermal_boundaries:
-        if boundary.mechanical_condition != "No-slip":
+        if not _is_no_slip_wall(boundary.mechanical_condition):
             continue
         for face_id in boundary.faces:
             owner = int(geometry.owners[face_id])
@@ -2930,8 +3007,11 @@ def _sst_wall_values(
                         / (0.075 * primitive[owner, 0] * distance**2)
                     )
             else:
-                tangential_velocity = primitive[owner, 1:3] - (
-                    float(np.dot(primitive[owner, 1:3], normal)) * normal
+                relative_velocity = (
+                    primitive[owner, 1:3] - geometry.wall_velocities[face_id]
+                )
+                tangential_velocity = relative_velocity - (
+                    float(np.dot(relative_velocity, normal)) * normal
                 )
                 friction_velocity = _wall_friction_velocity(
                     float(np.linalg.norm(tangential_velocity)),
@@ -3579,8 +3659,10 @@ def _viscous_gradients(
         ghost = cell_values[owner].copy()
         if kind == "Wall":
             wall = wall_by_face[int(face_id)]
-            if wall.mechanical_condition == "No-slip":
-                ghost[:2] *= -1.0
+            if _is_no_slip_wall(wall.mechanical_condition):
+                ghost[:2] = (
+                    2.0 * geometry.wall_velocities[face_id] - ghost[:2]
+                )
             else:
                 ghost[:2] -= (
                     2.0 * float(np.dot(ghost[:2], normal)) * normal
@@ -3856,10 +3938,12 @@ def _viscous_residual(
         )
         if kind == "Wall":
             boundary = wall_by_face[int(face_id)]
-            if boundary.mechanical_condition == "No-slip":
+            if _is_no_slip_wall(boundary.mechanical_condition):
+                wall_velocity = geometry.wall_velocities[face_id]
                 for component in (0, 1):
                     normal_derivative = (
-                        -boundary_values[component]
+                        wall_velocity[component]
+                        - boundary_values[component]
                         - float(
                             np.dot(
                                 face_gradient[component],
@@ -3871,7 +3955,7 @@ def _viscous_residual(
                         normal_derivative
                         - float(np.dot(face_gradient[component], normal))
                     ) * normal
-                    boundary_values[component] = 0.0
+                    boundary_values[component] = wall_velocity[component]
             else:
                 tangential_offset = offset - normal_distance * normal
                 normal_velocity = float(np.dot(boundary_values[:2], normal))
@@ -3959,7 +4043,9 @@ def _viscous_residual(
             is_wall_function = (
                 is_wall
                 and settings.turbulence_wall_treatment == "Wall functions"
-                and wall_by_face[int(face_id)].mechanical_condition == "No-slip"
+                and _is_no_slip_wall(
+                    wall_by_face[int(face_id)].mechanical_condition
+                )
             )
             if not is_wall:
                 face_mu += turbulent_viscosity[owner]
@@ -3998,10 +4084,13 @@ def _viscous_residual(
             wall = wall_by_face[int(face_id)]
             if (
                 settings.turbulence_wall_treatment == "Wall functions"
-                and wall.mechanical_condition == "No-slip"
+                and _is_no_slip_wall(wall.mechanical_condition)
             ):
-                tangential_velocity = primitive[owner, 1:3] - (
-                    float(np.dot(primitive[owner, 1:3], normal)) * normal
+                relative_velocity = (
+                    primitive[owner, 1:3] - geometry.wall_velocities[face_id]
+                )
+                tangential_velocity = relative_velocity - (
+                    float(np.dot(relative_velocity, normal)) * normal
                 )
                 friction_velocity = _wall_friction_velocity(
                     float(np.linalg.norm(tangential_velocity)),

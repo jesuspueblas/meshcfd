@@ -119,10 +119,13 @@ Select Constant or Sutherland viscosity in Numerical Setup to add the
 Newtonian stress tensor (Stokes hypothesis) and Fourier heat conduction.
 Sutherland defaults are for air: μref = 1.716e-5 Pa·s at Tref = 273.15 K and
 S = 110.4 K. Thermal conductivity is k = μ cp / Pr, with Pr = 0.72 by
-default. Each wall patch independently selects Slip or No-slip and either a
-fixed wall temperature (K) or prescribed heat flux (W/m²); positive heat flux
-enters the fluid. No-slip applies when viscosity is enabled; inviscid walls
-remain slip. Symmetry boundaries remain slip and adiabatic. Acceleration
+default. Each wall patch independently selects Slip, No-slip, or Prescribed
+velocity and either a fixed wall temperature (K) or prescribed heat flux
+(W/m²); positive heat flux enters the fluid. Prescribed velocity components
+are safe expressions in `x` and `y`, evaluated at each wall-face center and
+specified in m/s. They must be tangential to the fixed mesh wall. No-slip
+applies when viscosity is enabled; inviscid walls remain slip. Symmetry
+boundaries remain slip and adiabatic. Acceleration
 components are constant throughout the domain in m/s² and contribute both
 ρf to momentum and ρf·u to total energy. Diffusive explicit stability limits
 are included in the solver time step.
@@ -144,9 +147,10 @@ specific dissipation rate `omega` in 1/s under Initial Conditions. For
 Velocity Inlet, Pressure Inlet, Mass Flow Inlet, and Far Field boundaries,
 specify turbulence intensity in percent and a turbulence length scale in
 metres; the solver derives `k` and `omega` from those values and the boundary
-flow speed. No-slip walls support either wall-resolved SST (use a mesh that
-resolves the viscous near-wall region) or equilibrium logarithmic wall
-functions. The SST omega formulation defaults to Standard SST. The optional
+flow speed. No-slip and prescribed-velocity walls support either wall-resolved
+SST (use a mesh that resolves the viscous near-wall region) or equilibrium
+logarithmic wall functions. The SST omega formulation defaults to Standard
+SST. The optional
 Regularized k-log-omega formulation is available with wall-resolved treatment:
 it evolves `log(omega/omega_wall)`, sets that variable to zero at the wall, and
 uses `omega_wall = 6 mu / (rho beta* y_w^2)` with `beta* = 0.09`, following the

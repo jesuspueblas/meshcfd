@@ -15,6 +15,7 @@ from meshcfd.core.model import (
     LIMITER_SCHEMES,
     RECONSTRUCTION_SCHEMES,
     TIME_INTEGRATION_SCHEMES,
+    WALL_VELOCITY_EXPRESSION_KEYS,
     BoundaryCondition,
     Case,
     FiniteVolumeMesh,
@@ -70,6 +71,7 @@ def case_to_dict(
     for condition in case.boundary_conditions:
         _mechanical_condition(condition.mechanical_condition)
         _thermal_condition(condition.thermal_condition)
+        _validate_wall_velocity_expressions(condition.values)
     if case.numerics.viscosity_model not in ("Inviscid", "Constant", "Sutherland"):
         raise ValueError("Unsupported viscosity model.")
     if case.numerics.turbulence_model not in ("None", "Menter k-omega SST"):
@@ -309,10 +311,23 @@ def case_from_dict(
             raise ValueError("Boundary patch identifiers and names must be unique.")
         if not isinstance(values, dict):
             raise ValueError(f"Boundary values for {patch_name} must be an object.")
-        numeric_values = {}
+        boundary_values: dict[str, float | str] = {}
         for key, value in values.items():
             if not isinstance(key, str):
                 raise ValueError("Boundary value names must be strings.")
+            if key in WALL_VELOCITY_EXPRESSION_KEYS:
+                if not isinstance(value, str):
+                    raise ValueError(
+                        f"Boundary expression '{key}' must be a string."
+                    )
+                try:
+                    compile_expression(value)
+                except ExpressionError as error:
+                    raise ValueError(
+                        f"Invalid boundary expression '{key}': {error}"
+                    ) from error
+                boundary_values[key] = value
+                continue
             if isinstance(value, bool):
                 raise ValueError(f"Boundary value '{key}' must be numeric.")
             try:
@@ -321,13 +336,13 @@ def case_from_dict(
                 raise ValueError(f"Boundary value '{key}' must be numeric.") from error
             if not math.isfinite(number):
                 raise ValueError(f"Boundary value '{key}' must be finite.")
-            numeric_values[key] = number
+            boundary_values[key] = number
         conditions.append(
             BoundaryCondition(
                 patch_id,
                 patch_name,
                 kind,
-                numeric_values,
+                boundary_values,
                 thermal_condition=_thermal_condition(
                     raw_condition.get("thermal_condition", "Temperature")
                 ),
@@ -950,9 +965,26 @@ def _thermal_condition(value: Any) -> str:
 
 
 def _mechanical_condition(value: Any) -> str:
-    if value not in ("Slip", "No-slip"):
-        raise ValueError("Wall mechanical condition must be Slip or No-slip.")
+    if value not in ("Slip", "No-slip", "Prescribed velocity"):
+        raise ValueError(
+            "Wall mechanical condition must be Slip, No-slip, or Prescribed velocity."
+        )
     return value
+
+
+def _validate_wall_velocity_expressions(values: dict[str, Any]) -> None:
+    for key in WALL_VELOCITY_EXPRESSION_KEYS:
+        if key not in values:
+            continue
+        value = values[key]
+        if not isinstance(value, str):
+            raise ValueError(f"Boundary expression '{key}' must be a string.")
+        try:
+            compile_expression(value)
+        except ExpressionError as error:
+            raise ValueError(
+                f"Invalid boundary expression '{key}': {error}"
+            ) from error
 
 
 def _positive_integer(value: Any, description: str) -> int:
