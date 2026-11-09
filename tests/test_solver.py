@@ -6,6 +6,7 @@ import pytest
 
 from meshcfd.core._kernels import (
     limited_gradient_factors,
+    point_to_segments_minimum_distance,
     reconstruct_hllc_flux,
     weighted_least_squares_gradients,
 )
@@ -1806,3 +1807,17 @@ def test_interior_divergence_operator_matches_diffusive_add_at_sign():
     actual = -(geometry.interior_divergence_operator @ flux)
 
     np.testing.assert_allclose(actual, expected, rtol=0.0, atol=1e-13)
+
+
+def test_compiled_point_to_segment_distances_match_reference():
+    points = np.array(((0.5, 0.5), (2.0, 0.0), (-1.0, 0.5), (0.25, 2.0)))
+    starts = np.array(((0.0, 0.0), (0.0, 1.0), (1.0, 1.0)))
+    ends = np.array(((1.0, 0.0), (0.0, 2.0), (2.0, 1.0)))
+    expected = np.full(len(points), np.inf)
+    for start, end in zip(starts, ends):
+        edge = end - start
+        offsets = points - start
+        projection = np.clip(np.sum(offsets * edge, axis=1) / np.dot(edge, edge), 0.0, 1.0)
+        expected = np.minimum(expected, np.linalg.norm(offsets - projection[:, None] * edge, axis=1))
+    actual = point_to_segments_minimum_distance(points, starts, ends)
+    np.testing.assert_allclose(actual, expected, rtol=0.0, atol=1e-15)

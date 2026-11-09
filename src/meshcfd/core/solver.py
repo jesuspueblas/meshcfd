@@ -31,6 +31,7 @@ from meshcfd.core.euler import (
 from meshcfd.core.initial_conditions import evaluate_initial_conditions
 from meshcfd.core._kernels import (
     limited_gradient_factors,
+    point_to_segments_minimum_distance,
     reconstruct_hllc_flux,
     weighted_least_squares_gradients,
 )
@@ -1764,21 +1765,13 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
         dtype=int,
     )
     if len(turbulent_wall_faces):
-        wall_distances = np.full(len(mesh.cells), np.inf)
-        for face_id in turbulent_wall_faces:
-            node_a, node_b = mesh.faces[face_id]
-            point_a = np.asarray(mesh.points[node_a], dtype=float)
-            point_b = np.asarray(mesh.points[node_b], dtype=float)
-            edge = point_b - point_a
-            edge_length_squared = float(np.dot(edge, edge))
-            offsets = centers - point_a
-            projections = np.clip(
-                np.sum(offsets * edge, axis=1) / edge_length_squared, 0.0, 1.0
-            )
-            distances = np.linalg.norm(
-                offsets - projections[:, None] * edge, axis=1
-            )
-            wall_distances = np.minimum(wall_distances, distances)
+        face_nodes = np.asarray(mesh.faces, dtype=int)[turbulent_wall_faces]
+        mesh_points = np.asarray(mesh.points, dtype=float)
+        wall_distances = point_to_segments_minimum_distance(
+            centers,
+            mesh_points[face_nodes[:, 0]],
+            mesh_points[face_nodes[:, 1]],
+        )
     else:
         domain_length = max(
             max(x for x, _ in mesh.points) - min(x for x, _ in mesh.points),

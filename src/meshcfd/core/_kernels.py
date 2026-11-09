@@ -205,3 +205,32 @@ def weighted_least_squares_gradients(
                     - rhs_x[cell, component] * xy[cell]
                 ) * inverse
     return gradients
+
+
+@njit(cache=True)
+def point_to_segments_minimum_distance(
+    points: np.ndarray,
+    segment_starts: np.ndarray,
+    segment_ends: np.ndarray,
+) -> np.ndarray:
+    """Compute exact minimum point-to-segment distances."""
+    distances = np.full(points.shape[0], np.inf, dtype=np.float64)
+    for segment in range(segment_starts.shape[0]):
+        ax = segment_starts[segment, 0]
+        ay = segment_starts[segment, 1]
+        ex = segment_ends[segment, 0] - ax
+        ey = segment_ends[segment, 1] - ay
+        length_squared = ex * ex + ey * ey
+        for point in range(points.shape[0]):
+            ox = points[point, 0] - ax
+            oy = points[point, 1] - ay
+            projection = 0.0
+            if length_squared > 0.0:
+                projection = (ox * ex + oy * ey) / length_squared
+                projection = min(max(projection, 0.0), 1.0)
+            dx = ox - projection * ex
+            dy = oy - projection * ey
+            distance = np.sqrt(dx * dx + dy * dy)
+            if distance < distances[point]:
+                distances[point] = distance
+    return distances
