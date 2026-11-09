@@ -1579,3 +1579,27 @@ def test_geometry_builds_parabolic_stencil_only_when_requested(monkeypatch):
     assert len(calls) == 1
     assert parabolic_geometry.parabolic_sources.size > 0
     assert parabolic_geometry.parabolic_neighbours.size > 0
+
+
+def test_geometry_precomputes_interior_face_data():
+    case = make_periodic_case(3, 2)
+    case.numerics.reconstruction = "MUSCL linear"
+
+    geometry = _build_geometry(case.mesh, case)
+    faces = geometry.interior_faces
+    owners = geometry.owners[faces]
+    neighbours = geometry.neighbours[faces]
+
+    np.testing.assert_array_equal(geometry.interior_owners, owners)
+    np.testing.assert_array_equal(geometry.interior_neighbours, neighbours)
+    np.testing.assert_allclose(geometry.inverse_areas, 1.0 / geometry.areas)
+    np.testing.assert_allclose(geometry.interior_normals, geometry.face_normals[faces])
+    np.testing.assert_allclose(geometry.interior_lengths, geometry.face_lengths[faces])
+    np.testing.assert_allclose(
+        geometry.interior_owner_offsets,
+        geometry.face_centers[faces] - geometry.centers[owners],
+    )
+    np.testing.assert_allclose(
+        geometry.interior_neighbour_offsets,
+        geometry.face_centers[faces] - geometry.centers[neighbours],
+    )

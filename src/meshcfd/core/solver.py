@@ -111,6 +111,7 @@ class _TurbulenceInlet:
 class _Geometry:
     centers: np.ndarray
     areas: np.ndarray
+    inverse_areas: np.ndarray
     face_centers: np.ndarray
     face_normals: np.ndarray
     face_lengths: np.ndarray
@@ -121,6 +122,12 @@ class _Geometry:
     patch_mechanical_conditions: dict[int, str]
     wall_distances: np.ndarray
     interior_faces: np.ndarray
+    interior_owners: np.ndarray
+    interior_neighbours: np.ndarray
+    interior_normals: np.ndarray
+    interior_lengths: np.ndarray
+    interior_owner_offsets: np.ndarray
+    interior_neighbour_offsets: np.ndarray
     wall_faces: np.ndarray
     symmetry_faces: np.ndarray
     diffusive_boundary_faces: np.ndarray
@@ -142,6 +149,8 @@ class _Geometry:
     gradient_neighbours: np.ndarray
     gradient_dx: np.ndarray
     gradient_dy: np.ndarray
+    gradient_operator_x: object
+    gradient_operator_y: object
     parabolic_sources: np.ndarray
     parabolic_neighbours: np.ndarray
     parabolic_dx: np.ndarray
@@ -1996,6 +2005,58 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
         parabolic_dx = np.empty(0, dtype=float)
         parabolic_dy = np.empty(0, dtype=float)
 
+    gradient_sources_array = np.asarray(gradient_sources, dtype=int)
+    gradient_neighbours_array = np.asarray(gradient_neighbours, dtype=int)
+    gradient_dx_array = np.asarray(gradient_dx, dtype=float)
+    gradient_dy_array = np.asarray(gradient_dy, dtype=float)
+    gradient_distance_squared = (
+        gradient_dx_array * gradient_dx_array
+        + gradient_dy_array * gradient_dy_array
+    )
+    gradient_weights = 1.0 / np.maximum(gradient_distance_squared, 1e-300)
+    gradient_weight_dx = gradient_weights * gradient_dx_array
+    gradient_weight_dy = gradient_weights * gradient_dy_array
+    matrix_xx = np.zeros(len(mesh.cells), dtype=float)
+    matrix_xy = np.zeros(len(mesh.cells), dtype=float)
+    matrix_yy = np.zeros(len(mesh.cells), dtype=float)
+    np.add.at(matrix_xx, gradient_sources_array, gradient_weight_dx * gradient_dx_array)
+    np.add.at(matrix_xy, gradient_sources_array, gradient_weight_dx * gradient_dy_array)
+    np.add.at(matrix_yy, gradient_sources_array, gradient_weight_dy * gradient_dy_array)
+    determinant = matrix_xx * matrix_yy - matrix_xy * matrix_xy
+    valid = determinant > 1e-14 * np.maximum(matrix_xx * matrix_yy, 1e-300)
+    inverse_xx = np.zeros(len(mesh.cells), dtype=float)
+    inverse_xy = np.zeros(len(mesh.cells), dtype=float)
+    inverse_yy = np.zeros(len(mesh.cells), dtype=float)
+    inverse_xx[valid] = matrix_yy[valid] / determinant[valid]
+    inverse_xy[valid] = -matrix_xy[valid] / determinant[valid]
+    inverse_yy[valid] = matrix_xx[valid] / determinant[valid]
+    coefficients_x = (
+        inverse_xx[gradient_sources_array] * gradient_weight_dx
+        + inverse_xy[gradient_sources_array] * gradient_weight_dy
+    )
+    coefficients_y = (
+        inverse_xy[gradient_sources_array] * gradient_weight_dx
+        + inverse_yy[gradient_sources_array] * gradient_weight_dy
+    )
+    gradient_rows = np.concatenate((gradient_sources_array, gradient_sources_array))
+    gradient_columns = np.concatenate(
+        (gradient_neighbours_array, gradient_sources_array)
+    )
+    gradient_operator_x = coo_matrix(
+        (
+            np.concatenate((coefficients_x, -coefficients_x)),
+            (gradient_rows, gradient_columns),
+        ),
+        shape=(len(mesh.cells), len(mesh.cells)),
+    ).tocsr()
+    gradient_operator_y = coo_matrix(
+        (
+            np.concatenate((coefficients_y, -coefficients_y)),
+            (gradient_rows, gradient_columns),
+        ),
+        shape=(len(mesh.cells), len(mesh.cells)),
+    ).tocsr()
+
     limiter_cells = list(owners)
     limiter_dx = list(np.asarray(face_centers)[:, 0] - centers[owners, 0])
     limiter_dy = list(np.asarray(face_centers)[:, 1] - centers[owners, 1])
@@ -2005,12 +2066,19 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
         limiter_dx.append(face_centers[face_id][0] - centers[neighbour, 0])
         limiter_dy.append(face_centers[face_id][1] - centers[neighbour, 1])
 
+    face_centers_array = np.asarray(face_centers)
+    face_normals_array = np.asarray(face_normals)
+    face_lengths_array = np.asarray(face_lengths)
+    interior_owners = owners[interior_faces]
+    interior_neighbours = neighbours[interior_faces]
+
     return _Geometry(
         centers=centers,
         areas=areas,
-        face_centers=np.asarray(face_centers),
-        face_normals=np.asarray(face_normals),
-        face_lengths=np.asarray(face_lengths),
+        inverse_areas=1.0 / areas,
+        face_centers=face_centers_array,
+        face_normals=face_normals_array,
+        face_lengths=face_lengths_array,
         owners=owners,
         neighbours=neighbours,
         patch_ids=patch_ids,
@@ -2018,6 +2086,16 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
         patch_mechanical_conditions=patch_mechanical_conditions,
         wall_distances=wall_distances,
         interior_faces=interior_faces,
+        interior_owners=interior_owners,
+        interior_neighbours=interior_neighbours,
+        interior_normals=face_normals_array[interior_faces],
+        interior_lengths=face_lengths_array[interior_faces],
+        interior_owner_offsets=(
+            face_centers_array[interior_faces] - centers[interior_owners]
+        ),
+        interior_neighbour_offsets=(
+            face_centers_array[interior_faces] - centers[interior_neighbours]
+        ),
         wall_faces=wall_faces,
         symmetry_faces=symmetry_faces,
         diffusive_boundary_faces=diffusive_boundary_faces,
@@ -2039,10 +2117,12 @@ def _build_geometry(mesh: FiniteVolumeMesh, case: Case) -> _Geometry:
         mass_flow_outlets=tuple(mass_flow_outlets),
         wall_thermal_boundaries=tuple(wall_thermal_boundaries),
         turbulence_inlets=tuple(turbulence_inlets),
-        gradient_sources=np.asarray(gradient_sources, dtype=int),
-        gradient_neighbours=np.asarray(gradient_neighbours, dtype=int),
-        gradient_dx=np.asarray(gradient_dx, dtype=float),
-        gradient_dy=np.asarray(gradient_dy, dtype=float),
+        gradient_sources=gradient_sources_array,
+        gradient_neighbours=gradient_neighbours_array,
+        gradient_dx=gradient_dx_array,
+        gradient_dy=gradient_dy_array,
+        gradient_operator_x=gradient_operator_x,
+        gradient_operator_y=gradient_operator_y,
         parabolic_sources=parabolic_sources,
         parabolic_neighbours=parabolic_neighbours,
         parabolic_dx=parabolic_dx,
@@ -2115,30 +2195,8 @@ def _limited_gradients(
     if len(sources) == 0:
         return gradients, np.ones((cell_count, 4), dtype=float)
     neighbours = geometry.gradient_neighbours
-    dx, dy = geometry.gradient_dx, geometry.gradient_dy
-    distance_squared = dx * dx + dy * dy
-    weights = 1.0 / np.maximum(distance_squared, 1e-300)
-    matrix_xx = np.zeros(cell_count)
-    matrix_xy = np.zeros(cell_count)
-    matrix_yy = np.zeros(cell_count)
-    np.add.at(matrix_xx, sources, weights * dx * dx)
-    np.add.at(matrix_xy, sources, weights * dx * dy)
-    np.add.at(matrix_yy, sources, weights * dy * dy)
-    difference = primitive[neighbours] - primitive[sources]
-    rhs_x = np.zeros((cell_count, 4))
-    rhs_y = np.zeros((cell_count, 4))
-    np.add.at(rhs_x, sources, (weights * dx)[:, None] * difference)
-    np.add.at(rhs_y, sources, (weights * dy)[:, None] * difference)
-    determinant = matrix_xx * matrix_yy - matrix_xy * matrix_xy
-    valid = determinant > 1e-14 * np.maximum(matrix_xx * matrix_yy, 1e-300)
-    gradients[valid, :, 0] = (
-        rhs_x[valid] * matrix_yy[valid, None]
-        - rhs_y[valid] * matrix_xy[valid, None]
-    ) / determinant[valid, None]
-    gradients[valid, :, 1] = (
-        rhs_y[valid] * matrix_xx[valid, None]
-        - rhs_x[valid] * matrix_xy[valid, None]
-    ) / determinant[valid, None]
+    gradients[:, :, 0] = geometry.gradient_operator_x @ primitive
+    gradients[:, :, 1] = geometry.gradient_operator_y @ primitive
 
     local_min = primitive.copy()
     local_max = primitive.copy()
@@ -2330,28 +2388,25 @@ def _residual(
 
     derivative = np.zeros_like(conservative)
     if len(geometry.interior_faces):
-        faces = geometry.interior_faces
-        owners = geometry.owners[faces]
-        neighbours = geometry.neighbours[faces]
-        left = reconstruct(
-            owners,
-            geometry.face_centers[faces] - geometry.centers[owners],
-        )
-        right = reconstruct(
-            neighbours,
-            geometry.face_centers[faces] - geometry.centers[neighbours],
-        )
+        owners = geometry.interior_owners
+        neighbours = geometry.interior_neighbours
+        left = reconstruct(owners, geometry.interior_owner_offsets)
+        right = reconstruct(neighbours, geometry.interior_neighbour_offsets)
         flux = numerical_flux(
-            left, right, geometry.face_normals[faces], gamma, settings.flux
+            left, right, geometry.interior_normals, gamma, settings.flux
         )
         if turbulence is not None:
             flux[:, 3] += flux[:, 0] * np.where(
                 flux[:, 0] >= 0.0, turbulence[owners, 0], turbulence[neighbours, 0]
             )
-        integrated = flux * geometry.face_lengths[faces, None]
-        np.add.at(derivative, owners, -integrated / geometry.areas[owners, None])
+        integrated = flux * geometry.interior_lengths[:, None]
         np.add.at(
-            derivative, neighbours, integrated / geometry.areas[neighbours, None]
+            derivative, owners, -integrated * geometry.inverse_areas[owners, None]
+        )
+        np.add.at(
+            derivative,
+            neighbours,
+            integrated * geometry.inverse_areas[neighbours, None],
         )
     if len(geometry.periodic_faces_a):
         faces_a, faces_b = geometry.periodic_faces_a, geometry.periodic_faces_b
