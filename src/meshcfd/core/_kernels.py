@@ -65,3 +65,96 @@ def limited_gradient_factors(
                 factors[cell, variable] = face_factor
 
     return factors
+
+
+@njit(cache=True)
+def reconstruct_hllc_flux(
+    primitive: np.ndarray,
+    gradients: np.ndarray,
+    factors: np.ndarray,
+    owners: np.ndarray,
+    neighbours: np.ndarray,
+    owner_offsets: np.ndarray,
+    neighbour_offsets: np.ndarray,
+    normals: np.ndarray,
+    gamma: float,
+) -> np.ndarray:
+    """Fuse linear reconstruction and HLLC flux evaluation for interior faces."""
+    face_count = owners.size
+    fluxes = np.empty((face_count, 4), dtype=np.float64)
+    for face in range(face_count):
+        owner = owners[face]
+        neighbour = neighbours[face]
+        left = np.empty(4, dtype=np.float64)
+        right = np.empty(4, dtype=np.float64)
+        for variable in range(4):
+            left[variable] = primitive[owner, variable] + factors[owner, variable] * (
+                gradients[owner, variable, 0] * owner_offsets[face, 0]
+                + gradients[owner, variable, 1] * owner_offsets[face, 1]
+            )
+            right[variable] = primitive[neighbour, variable] + factors[neighbour, variable] * (
+                gradients[neighbour, variable, 0] * neighbour_offsets[face, 0]
+                + gradients[neighbour, variable, 1] * neighbour_offsets[face, 1]
+            )
+
+        nx = normals[face, 0]
+        ny = normals[face, 1]
+        rho_l, ux_l, uy_l, p_l = left
+        rho_r, ux_r, uy_r, p_r = right
+        un_l = ux_l * nx + uy_l * ny
+        un_r = ux_r * nx + uy_r * ny
+        sound_l = np.sqrt(gamma * p_l / rho_l)
+        sound_r = np.sqrt(gamma * p_r / rho_r)
+        wave_l = min(un_l - sound_l, un_r - sound_r)
+        wave_r = max(un_l + sound_l, un_r + sound_r)
+
+        energy_l = p_l / (gamma - 1.0) + 0.5 * rho_l * (ux_l * ux_l + uy_l * uy_l)
+        energy_r = p_r / (gamma - 1.0) + 0.5 * rho_r * (ux_r * ux_r + uy_r * uy_r)
+        state_l = np.array((rho_l, rho_l * ux_l, rho_l * uy_l, energy_l))
+        state_r = np.array((rho_r, rho_r * ux_r, rho_r * uy_r, energy_r))
+        flux_l = np.array((
+            rho_l * un_l,
+            rho_l * ux_l * un_l + p_l * nx,
+            rho_l * uy_l * un_l + p_l * ny,
+            (energy_l + p_l) * un_l,
+        ))
+        flux_r = np.array((
+            rho_r * un_r,
+            rho_r * ux_r * un_r + p_r * nx,
+            rho_r * uy_r * un_r + p_r * ny,
+            (energy_r + p_r) * un_r,
+        ))
+        denominator = rho_l * (wave_l - un_l) - rho_r * (wave_r - un_r)
+        if abs(denominator) <= 1e-14:
+            denominator = np.copysign(1e-14, denominator)
+        contact = (
+            p_r - p_l
+            + rho_l * un_l * (wave_l - un_l)
+            - rho_r * un_r * (wave_r - un_r)
+        ) / denominator
+
+        if wave_l >= 0.0:
+            fluxes[face] = flux_l
+            continue
+        if wave_r <= 0.0:
+            fluxes[face] = flux_r
+            continue
+
+        if contact >= 0.0:
+            rho, ux, uy, pressure = rho_l, ux_l, uy_l, p_l
+            un, wave, energy = un_l, wave_l, energy_l
+            state, physical = state_l, flux_l
+        else:
+            rho, ux, uy, pressure = rho_r, ux_r, uy_r, p_r
+            un, wave, energy = un_r, wave_r, energy_r
+            state, physical = state_r, flux_r
+        factor = rho * (wave - un) / (wave - contact)
+        star_ux = ux + (contact - un) * nx
+        star_uy = uy + (contact - un) * ny
+        star_energy = factor * (
+            energy / rho
+            + (contact - un) * (contact + pressure / (rho * (wave - un)))
+        )
+        star = np.array((factor, factor * star_ux, factor * star_uy, star_energy))
+        fluxes[face] = physical + wave * (star - state)
+    return fluxes

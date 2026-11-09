@@ -4,7 +4,7 @@ from threading import Event, Thread
 import numpy as np
 import pytest
 
-from meshcfd.core._kernels import limited_gradient_factors
+from meshcfd.core._kernels import limited_gradient_factors, reconstruct_hllc_flux
 
 from meshcfd.core.adaptation import AdaptationBalanceError
 from meshcfd.core.euler import (
@@ -28,9 +28,11 @@ from meshcfd.core.solver import (
     _far_field_boundary_states,
     _implicit_euler_step,
     _mass_flow_inlet_boundary_states,
+    _limited_gradients,
     _mass_flow_outlet_boundary_states,
     _parabolic_reconstruction,
     _pressure_inlet_boundary_states,
+    _reconstruct,
     _primitive_from_conservative,
     _residual,
     _sst_fields,
@@ -1696,3 +1698,45 @@ def test_compiled_limiter_matches_numpy_reference_for_all_schemes():
         )
 
         np.testing.assert_array_equal(actual, expected)
+
+
+def test_compiled_reconstruction_hllc_matches_vectorized_reference():
+    case = make_periodic_case(6, 5)
+    case.numerics.reconstruction = "MUSCL linear"
+    geometry = _build_geometry(case.mesh, case)
+    primitive = np.column_stack(
+        (
+            1.0 + 0.03 * np.sin(np.arange(30)),
+            0.25 + 0.05 * np.cos(0.3 * np.arange(30)),
+            -0.04 + 0.02 * np.sin(0.7 * np.arange(30)),
+            1.0 + 0.04 * np.cos(0.5 * np.arange(30)),
+        )
+    )
+    gradients, factors = _limited_gradients(
+        primitive, geometry, case.numerics.limiter
+    )
+    owners = geometry.interior_owners
+    neighbours = geometry.interior_neighbours
+    left = _reconstruct(
+        primitive, gradients, factors, owners, geometry.interior_owner_offsets
+    )
+    right = _reconstruct(
+        primitive, gradients, factors, neighbours, geometry.interior_neighbour_offsets
+    )
+    expected = numerical_flux(
+        left, right, geometry.interior_normals, case.numerics.gamma, "HLLC"
+    )
+
+    actual = reconstruct_hllc_flux(
+        primitive,
+        gradients,
+        factors,
+        owners,
+        neighbours,
+        geometry.interior_owner_offsets,
+        geometry.interior_neighbour_offsets,
+        geometry.interior_normals,
+        case.numerics.gamma,
+    )
+
+    np.testing.assert_allclose(actual, expected, rtol=2e-14, atol=2e-14)

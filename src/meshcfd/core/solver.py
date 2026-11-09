@@ -29,7 +29,7 @@ from meshcfd.core.euler import (
     primitive_to_conservative,
 )
 from meshcfd.core.initial_conditions import evaluate_initial_conditions
-from meshcfd.core._kernels import limited_gradient_factors
+from meshcfd.core._kernels import limited_gradient_factors, reconstruct_hllc_flux
 from meshcfd.core.model import (
     Case,
     FiniteVolumeMesh,
@@ -2390,11 +2390,24 @@ def _residual(
     if len(geometry.interior_faces):
         owners = geometry.interior_owners
         neighbours = geometry.interior_neighbours
-        left = reconstruct(owners, geometry.interior_owner_offsets)
-        right = reconstruct(neighbours, geometry.interior_neighbour_offsets)
-        flux = numerical_flux(
-            left, right, geometry.interior_normals, gamma, settings.flux
-        )
+        if settings.flux == "HLLC" and curvature is None and turbulence is None:
+            flux = reconstruct_hllc_flux(
+                primitive,
+                gradients,
+                factors,
+                owners,
+                neighbours,
+                geometry.interior_owner_offsets,
+                geometry.interior_neighbour_offsets,
+                geometry.interior_normals,
+                gamma,
+            )
+        else:
+            left = reconstruct(owners, geometry.interior_owner_offsets)
+            right = reconstruct(neighbours, geometry.interior_neighbour_offsets)
+            flux = numerical_flux(
+                left, right, geometry.interior_normals, gamma, settings.flux
+            )
         if turbulence is not None:
             flux[:, 3] += flux[:, 0] * np.where(
                 flux[:, 0] >= 0.0, turbulence[owners, 0], turbulence[neighbours, 0]
