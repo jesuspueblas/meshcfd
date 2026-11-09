@@ -3192,14 +3192,19 @@ def _sst_fields(
     molecular_viscosity = _dynamic_viscosity(temperature, settings)
     k_gradient = turbulence_gradients[:, 0, :]
     omega_gradient = turbulence_gradients[:, 1, :]
-    cross_diffusion = np.maximum(
+    # CD_komega is clipped only for the F1 denominator.  The omega-equation
+    # source must retain its sign and must be blended with (1 - F1).
+    # Reusing the clipped denominator as a source injects a spurious positive
+    # term throughout the near-wall k-omega region, drives omega too high and
+    # collapses k and the eddy viscosity.
+    raw_cross_diffusion = (
         2.0
         * density
         * 0.856
         / omega
-        * np.sum(k_gradient * omega_gradient, axis=1),
-        1e-20,
+        * np.sum(k_gradient * omega_gradient, axis=1)
     )
+    cd_komega = np.maximum(raw_cross_diffusion, 1e-20)
     distance = np.maximum(geometry.wall_distances, 1e-12)
     k_term = np.sqrt(kinetic_energy) / (0.09 * omega * distance)
     viscous_term = 500.0 * molecular_viscosity / (
@@ -3207,7 +3212,7 @@ def _sst_fields(
     )
     arg1 = np.minimum(
         np.maximum(k_term, viscous_term),
-        4.0 * density * 0.856 * kinetic_energy / (cross_diffusion * distance**2),
+        4.0 * density * 0.856 * kinetic_energy / (cd_komega * distance**2),
     )
     f1 = np.tanh(np.maximum(arg1, 0.0) ** 4)
     arg2 = np.maximum(2.0 * k_term, viscous_term)
@@ -3226,31 +3231,30 @@ def _sst_fields(
     strain_squared = (
         du_dx**2 + dv_dy**2 + 0.5 * (du_dy + dv_dx) ** 2
     )
-    production = (
-        2.0
-        * 0.31
-        * density
-        * kinetic_energy
-        / np.maximum(
-            0.31 * omega,
-            np.abs(du_dy - dv_dx) * f2,
-        )
-        * (strain_squared - divergence**2 / 3.0)
-        - (2.0 / 3.0) * density * kinetic_energy * divergence
-    )
-    production = np.minimum(production, 20.0 * 0.09 * density * omega * kinetic_energy)
+    strain_magnitude = np.sqrt(np.maximum(2.0 * strain_squared, 0.0))
     turbulent_viscosity = (
         density
         * 0.31
         * kinetic_energy
-        / np.maximum(0.31 * omega, np.abs(du_dy - dv_dx) * f2)
+        / np.maximum(0.31 * omega, strain_magnitude * f2)
     )
+    production = (
+        2.0
+        * turbulent_viscosity
+        * (strain_squared - divergence**2 / 3.0)
+        - (2.0 / 3.0) * density * kinetic_energy * divergence
+    )
+    production = np.maximum(production, 0.0)
+    production = np.minimum(
+        production, 10.0 * 0.09 * density * omega * kinetic_energy
+    )
+    cross_diffusion_source = (1.0 - f1) * raw_cross_diffusion
     return (
         turbulent_viscosity,
         turbulence_gradients,
         sigma_k,
         sigma_omega,
-        np.column_stack((production, beta, gamma, cross_diffusion)),
+        np.column_stack((production, beta, gamma, cross_diffusion_source)),
     )
 
 
